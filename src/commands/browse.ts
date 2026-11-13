@@ -23,7 +23,6 @@ export async function browseCommand(): Promise<void> {
             ...notes.map((note) => ({
               value: note.uuid,
               label: note.title,
-              hint: note.protected ? "protected" : "not protected",
             })),
             { value: "__quit", label: "Quit" },
           ],

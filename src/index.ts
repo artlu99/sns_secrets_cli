@@ -11,6 +11,7 @@ import { logoutCommand } from "./commands/logout.ts";
 import { searchCommand } from "./commands/search.ts";
 import { showCommand } from "./commands/show.ts";
 import { syncCommand } from "./commands/sync.ts";
+import { tagsCommand } from "./commands/tags.ts";
 import { UserError } from "./errors.ts";
 import { scrubProcessEnv } from "./env.ts";
 import { VERSION } from "./version.ts";
@@ -41,10 +42,13 @@ program
 
 program.command("sync").description("pull and decrypt notes into the encrypted cache").action(syncCommand);
 
+program.command("tags").description("list tags and folders (read-only)").action(tagsCommand);
+
 program
   .command("list")
   .description("list notes from the cache")
   .option("--type <content_type>", "filter by content type, e.g. Note")
+  .option("--tag <name>", "only notes under this tag or folder")
   .option("--limit <n>", "max rows", "100")
   .option("--all", "include key-bearing items")
   .action(listCommand);

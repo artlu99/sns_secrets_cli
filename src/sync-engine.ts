@@ -17,13 +17,23 @@ export type SyncReport = {
   pages: number;
 };
 
-/** Notes are what we show. Items keys stay so later syncs can decrypt without the password. */
+const STORED_TYPES = new Set(["Note", "SN|ItemsKey", "Tag"]);
+
+/** Recorded in sync_state; a mismatch forces a full pull so newly stored types backfill. */
+const STORED_TYPES_VERSION = [...STORED_TYPES].sort().join(",");
+
+/**
+ * Notes are what we show. Tags come along read-only (titles, parents, note
+ * links — the CLI never writes them). Items keys stay so later syncs can
+ * decrypt without the password.
+ */
 export function isStoredType(contentType: string): boolean {
-  return contentType === "Note" || contentType === "SN|ItemsKey";
+  return STORED_TYPES.has(contentType);
 }
 
 export function dropUnstoredTypes(db: CacheDb): void {
-  db.prepare("DELETE FROM items WHERE content_type NOT IN ('Note', 'SN|ItemsKey')").run();
+  const keep = [...STORED_TYPES].map((type) => `'${type}'`).join(", ");
+  db.prepare(`DELETE FROM items WHERE content_type NOT IN (${keep})`).run();
 }
 
 export function updatedAtMs(item: EncryptedItem): number {
@@ -128,9 +138,13 @@ export async function runSync(options: {
   let masterKey = options.masterKey;
   let prompted = options.masterKey !== null;
   const state = readSyncState(options.db);
-  let syncToken = state.syncToken;
+  // The token only applies to the stored-type set that produced it; after a
+  // change (e.g. tags newly stored) the incremental feed would never resend
+  // what earlier syncs dropped, so fall back to a full pull.
+  const tokenMatchesTypes = state.storedTypes === STORED_TYPES_VERSION;
+  let syncToken = tokenMatchesTypes ? state.syncToken : null;
   let cursor: string | null = null;
-  let newestToken = state.syncToken;
+  let newestToken = syncToken;
   const deferred: EncryptedItem[] = [];
   const report: SyncReport = { upserted: 0, skipped: 0, conflicts: 0, pages: 0 };
 
@@ -199,6 +213,6 @@ export async function runSync(options: {
     }
   }
 
-  writeSyncState(options.db, newestToken, Date.now());
+  writeSyncState(options.db, newestToken, Date.now(), STORED_TYPES_VERSION);
   return report;
 }

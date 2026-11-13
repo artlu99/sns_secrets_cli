@@ -31,6 +31,13 @@ CREATE TABLE IF NOT EXISTS sync_state (
 );
 `;
 
+const MIGRATIONS: Array<{ name: string; sql: string }> = [
+  {
+    name: "sync_state.stored_types",
+    sql: "ALTER TABLE sync_state ADD COLUMN stored_types TEXT",
+  },
+];
+
 /**
  * True only for "this file is not a database we can read" — a wrong key or a
  * corrupt file (SQLITE_NOTADB). Busy and I/O errors must NOT match: they are
@@ -54,6 +61,14 @@ export function openDatabase(path: string, dbKey: string): CacheDb {
     db.pragma("busy_timeout = 5000");
     db.prepare("SELECT count(*) AS n FROM sqlite_master").get();
     db.exec(SCHEMA);
+    for (const migration of MIGRATIONS) {
+      const [table, column] = migration.name.split(".");
+      const columns = db.prepare("SELECT name FROM pragma_table_info(?)").all(table) as Array<{
+        name: string;
+      }>;
+      if (columns.some((existing) => existing.name === column)) continue;
+      db.exec(migration.sql);
+    }
   } catch (error) {
     db.close();
     if (error instanceof UserError) throw error;
@@ -88,21 +103,28 @@ export function openDatabaseOrReplace(path: string, dbKey: string): { db: CacheD
 export type SyncState = {
   syncToken: string | null;
   lastSync: number | null;
+  storedTypes: string | null;
 };
 
 export function readSyncState(db: CacheDb): SyncState {
-  const row = db.prepare("SELECT sync_token, last_sync FROM sync_state WHERE id = 1").get() as
-    | { sync_token: string | null; last_sync: number | null }
-    | undefined;
-  if (!row) return { syncToken: null, lastSync: null };
-  return { syncToken: row.sync_token, lastSync: row.last_sync };
+  const row = db
+    .prepare("SELECT sync_token, last_sync, stored_types FROM sync_state WHERE id = 1")
+    .get() as { sync_token: string | null; last_sync: number | null; stored_types: string | null } | undefined;
+  if (!row) return { syncToken: null, lastSync: null, storedTypes: null };
+  return { syncToken: row.sync_token, lastSync: row.last_sync, storedTypes: row.stored_types };
 }
 
-export function writeSyncState(db: CacheDb, syncToken: string | null, lastSync: number): void {
+export function writeSyncState(
+  db: CacheDb,
+  syncToken: string | null,
+  lastSync: number,
+  storedTypes: string | null,
+): void {
   db.prepare(
-    `INSERT INTO sync_state (id, sync_token, last_sync) VALUES (1, ?, ?)
-     ON CONFLICT(id) DO UPDATE SET sync_token = excluded.sync_token, last_sync = excluded.last_sync`,
-  ).run(syncToken, lastSync);
+    `INSERT INTO sync_state (id, sync_token, last_sync, stored_types) VALUES (1, ?, ?, ?)
+     ON CONFLICT(id) DO UPDATE SET
+       sync_token = excluded.sync_token, last_sync = excluded.last_sync, stored_types = excluded.stored_types`,
+  ).run(syncToken, lastSync, storedTypes);
 }
 
 export function upsertItems(db: CacheDb, rows: ItemRow[]): void {

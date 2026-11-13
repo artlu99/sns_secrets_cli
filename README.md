@@ -21,6 +21,8 @@ bun src/index.ts login
 
 ```bash
 sns list
+sns tags
+sns list --tag <tag-or-folder>
 sns search <query>
 sns show <id-or-title-prefix>
 sns copy <id-or-title-prefix>
@@ -29,7 +31,7 @@ sns sync
 sns logout
 ```
 
-`sns` with no arguments asks for a filter, then offers to view or copy the note you pick. `list` and `search` hide key-bearing items unless you pass `--all`. `show` pages the note on standard input so the text is not written to a temp file; `--no-pager` prints it to standard output. `sync` pulls again and asks for the password only when a new items key cannot be unwrapped with keys already in the cache. `logout` revokes the server session and deletes the local session, the cache key, and the cache. `doctor` reports whether the runtime, keychain, session file, and cache look right.
+`sns` with no arguments asks for a filter, then offers to view or copy the note you pick. `list` renders the tag tree: explicit SN folders (nested tags) win, otherwise containment is inferred from note membership — a tag whose notes all also sit in a bigger tag nests under it (so `data` folds inside `infra` when every data note is also tagged infra). Each note appears exactly once, under its deepest tag; group headers show the tag's full note count, newest first within each, untagged notes last. `list` and `search` hide key-bearing items unless you pass `--all`. `tags` lists every tag and folder as a tree with note counts — read-only, the CLI never creates or edits them. `list --tag` filters notes under a tag or folder, matched by title or uuid prefix. `show` pages the note on standard input so the text is not written to a temp file; `--no-pager` prints it to standard output. `sync` pulls again and asks for the password only when a new items key cannot be unwrapped with keys already in the cache. `logout` revokes the server session and deletes the local session, the cache key, and the cache. `doctor` reports whether the runtime, keychain, session file, and cache look right.
 
 ## Where the files are
 

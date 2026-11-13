@@ -21,9 +21,10 @@ test("cache is encrypted at rest and rejects the wrong key", () => {
         content: JSON.stringify({ title: "Pins", text: "plaintext-marker-zebra" }),
       },
     ]);
-    writeSyncState(db, "token-1", 10);
+    writeSyncState(db, "token-1", 10, "Note,SN|ItemsKey");
     expect(countItems(db)).toBe(1);
     expect(readSyncState(db).syncToken).toBe("token-1");
+    expect(readSyncState(db).storedTypes).toBe("Note,SN|ItemsKey");
     db.close();
 
     const raw = readFileSync(path);

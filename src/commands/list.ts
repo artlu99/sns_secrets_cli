@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
 import { UserError } from "../errors.ts";
 import { openDatabase, type CacheDb } from "../db.ts";
-import { listNotes, renderTable } from "../notes.ts";
+import { listNotes, renderTagGroups, resolveTag, taggedNoteUuids } from "../notes.ts";
 import { dbPath } from "../paths.ts";
 import { loadSession } from "../session-file.ts";
 import { page } from "../pager.ts";
@@ -13,17 +13,23 @@ export async function openCache(): Promise<CacheDb> {
   return openDatabase(dbPath(), secrets.dbKey);
 }
 
-export async function listCommand(options: { type?: string; limit?: string; all?: boolean }): Promise<void> {
+export async function listCommand(options: {
+  type?: string;
+  tag?: string;
+  limit?: string;
+  all?: boolean;
+}): Promise<void> {
   const limit = Number(options.limit ?? "100");
   if (!Number.isInteger(limit) || limit < 1) throw new UserError("--limit must be a positive integer");
   const db = await openCache();
   try {
-    const notes = listNotes(db, { type: options.type, limit, all: options.all });
+    const tagUuids = options.tag ? taggedNoteUuids(db, resolveTag(db, options.tag).uuid) : undefined;
+    const notes = listNotes(db, { type: options.type, limit, all: options.all, tagUuids });
     if (notes.length === 0) {
       console.log("no notes in the cache — run sns sync");
       return;
     }
-    const table = renderTable(notes);
+    const table = renderTagGroups(db, notes);
     const rows = table.split("\n").length;
     const screen = process.stdout.rows ?? 24;
     if (process.stdout.isTTY && rows > screen - 1) await page(table);

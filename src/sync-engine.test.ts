@@ -3,8 +3,8 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomBytes } from "node:crypto";
-import { countItems, openDatabase } from "./db.ts";
-import { listNotes, noteBody, resolveNote, searchNotes } from "./notes.ts";
+import { countItems, openDatabase, readSyncState, writeSyncState } from "./db.ts";
+import { listNotes, listTags, noteBody, resolveNote, searchNotes, taggedNoteUuids } from "./notes.ts";
 import { canonicalJson, encrypt004 } from "./sn-crypto/004.ts";
 import type { EncryptedItem } from "./sn-crypto/004.ts";
 import { runSync, toUnixMs } from "./sync-engine.ts";
@@ -18,15 +18,24 @@ async function sealed(plaintext: string, key: string, aad: Record<string, unknow
   return encrypt004(plaintext, key, aad);
 }
 
-async function fixture(): Promise<{ master: string; itemsKey: string; items: EncryptedItem[]; noteId: string }> {
+async function fixture(): Promise<{
+  master: string;
+  itemsKey: string;
+  items: EncryptedItem[];
+  noteId: string;
+  tagId: string;
+}> {
   const master = hex();
   const itemsKey = hex();
   const itemsKeyId = crypto.randomUUID();
   const noteId = crypto.randomUUID();
+  const tagId = crypto.randomUUID();
   const wrap = hex();
   const noteKey = hex();
+  const tagKey = hex();
   const itemsAad = { u: itemsKeyId, v: "004" };
   const noteAad = { u: noteId, v: "004" };
+  const tagAad = { u: tagId, v: "004" };
   const items: EncryptedItem[] = [
     {
       uuid: itemsKeyId,
@@ -44,6 +53,18 @@ async function fixture(): Promise<{ master: string; itemsKey: string; items: Enc
       content: await sealed(JSON.stringify({ title: "Pins", text: "door code 2468" }), noteKey, noteAad),
     },
     {
+      uuid: tagId,
+      content_type: "Tag",
+      items_key_id: itemsKeyId,
+      updated_at_timestamp: 5_000,
+      enc_item_key: await sealed(tagKey, itemsKey, tagAad),
+      content: await sealed(
+        JSON.stringify({ title: "prod", references: [{ uuid: noteId, content_type: "Note" }] }),
+        tagKey,
+        tagAad,
+      ),
+    },
+    {
       uuid: crypto.randomUUID(),
       content_type: "SN|UserPreferences",
       updated_at_timestamp: 3_000,
@@ -56,7 +77,7 @@ async function fixture(): Promise<{ master: string; itemsKey: string; items: Enc
       content: "not-a-note",
     },
   ];
-  return { master, itemsKey, items, noteId };
+  return { master, itemsKey, items, noteId, tagId };
 }
 
 test("server timestamps in microseconds become unix milliseconds", () => {
@@ -67,7 +88,7 @@ test("server timestamps in microseconds become unix milliseconds", () => {
 
 test("sync writes decrypted notes, then an incremental pull is empty", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sns-sync-"));
-  const { master, items, noteId } = await fixture();
+  const { master, items, noteId, tagId } = await fixture();
   const db = openDatabase(join(dir, "cache.db"), hex());
   let calls = 0;
   try {
@@ -96,14 +117,20 @@ test("sync writes decrypted notes, then an incremental pull is empty", async () 
         return pages[calls - 1] ?? pages[1]!;
       },
     });
-    expect(first.upserted).toBe(2);
+    expect(first.upserted).toBe(3);
     expect(first.conflicts).toBe(1);
-    expect(countItems(db)).toBe(2);
+    expect(countItems(db)).toBe(3);
     const note = resolveNote(db, "Pins");
     expect(note.uuid).toBe(noteId);
     expect(noteBody(note).body).toBe("door code 2468");
     expect(listNotes(db, { limit: 10 }).map((row) => row.title)).toEqual(["Pins"]);
     expect(searchNotes(db, "2468", { limit: 10 })[0]?.snippet).toContain("2468");
+
+    const tags = listTags(db);
+    expect(tags.map((tag) => [tag.title, tag.parent, tag.notes])).toEqual([["prod", null, 1]]);
+    expect([...taggedNoteUuids(db, tagId)]).toEqual([noteId]);
+    const tagged = listNotes(db, { limit: 10, tagUuids: taggedNoteUuids(db, tagId) });
+    expect(tagged.map((row) => row.title)).toEqual(["Pins"]);
 
     const second = await runSync({
       db,
@@ -165,6 +192,44 @@ test("missing master key is requested once", async () => {
     });
     expect(prompts).toBe(1);
     expect(listNotes(db, { limit: 5 })).toHaveLength(1);
+  } finally {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a sync token from a different stored-type set is ignored (full pull)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sns-sync-migrate-"));
+  const { master, items } = await fixture();
+  const db = openDatabase(join(dir, "cache.db"), hex());
+  const calls: Array<string | null> = [];
+  try {
+    writeSyncState(db, "old-token", 1, "Note,SN|ItemsKey");
+    await runSync({
+      db,
+      masterKey: master,
+      ensureMasterKey: async () => master,
+      fetchPage: async (syncToken) => {
+        calls.push(syncToken);
+        return { items, syncToken: "new-token", cursorToken: null, conflicts: 0 };
+      },
+    });
+    // the stale token was never sent — the pull started from scratch
+    expect(calls).toEqual([null]);
+    const state = readSyncState(db);
+    expect(state.syncToken).toBe("new-token");
+    expect(state.storedTypes).not.toBe("Note,SN|ItemsKey");
+    // and the next pull is incremental again
+    await runSync({
+      db,
+      masterKey: master,
+      ensureMasterKey: async () => master,
+      fetchPage: async (syncToken) => {
+        calls.push(syncToken);
+        return { items: [], syncToken: "new-token", cursorToken: null, conflicts: 0 };
+      },
+    });
+    expect(calls).toEqual([null, "new-token"]);
   } finally {
     db.close();
     rmSync(dir, { recursive: true, force: true });
