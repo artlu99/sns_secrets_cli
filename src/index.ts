@@ -22,7 +22,7 @@ maybeClearStaleClipboard();
 const program = new Command();
 program
   .name("sns")
-  .description("Read Standard Notes with an encrypted local cache")
+  .description("Read Standard Notes with an encrypted local cache; run with no command for an interactive picker")
   .version(VERSION)
   .action(browseCommand);
 
@@ -46,7 +46,7 @@ program.command("tags").description("list tags and folders (read-only)").action(
 
 program
   .command("list")
-  .description("list notes with env-style values (count per note; --all for everything)")
+  .description("list notes (env-style setting count per note; --all for everything)")
   .option("--type <content_type>", "filter by content type, e.g. Note")
   .option("--tag <name>", "only notes under this tag or folder")
   .option("--limit <n>", "max rows", "100")
@@ -66,7 +66,7 @@ program
   .command("show")
   .description("show a note's setting keys and prose (values stay in the cache)")
   .argument("<id>", "uuid or title prefix")
-  .option("--no-pager", "print output to stdout")
+  .option("--no-pager", "print without paging")
   .option("--raw", "print the full note body, setting values included")
   .action(async (id: string, options: { pager?: boolean; raw?: boolean }) => {
     await showCommand(id, { noPager: options.pager === false, raw: options.raw });

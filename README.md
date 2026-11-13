@@ -43,7 +43,7 @@ a title or a uuid, a prefix is enough:  sns show <id>
 
 The hint is omitted when the listing is piped, so a script that reads the table stays a table.
 
-`sns show <id>` prints what the note holds without the values: the prose around the assignments, then the key names in the order they first appear, then a hint you can paste:
+`sns show <id>` prints what the note holds without the values: the prose around the assignments, then each key with its value withheld, in the order the keys first appear, then a hint you can paste:
 
 ```text
 staging api
@@ -51,15 +51,15 @@ staging api
 Notes on the staging API.
 Ask Alice before rotating.
 
-DB_HOST  # primary host
-API_KEY
-API_URL
-TOKEN  (empty)
+DB_HOST=[redacted]  # primary host
+API_KEY=[redacted]
+API_URL=[redacted]
+TOKEN=  (empty)
 
 copy a value:  sns copy staging DB_HOST
 ```
 
-An empty value is marked `(empty)`, and a trailing `# comment` from the note shows beside its key with the value redacted out — assignment-shaped text the parser rejected (`# OLD_KEY=…`, a mention mid-sentence) is masked the same way, so no value reaches the terminal. `sns show <id> --raw` prints the note's full text instead.
+An empty value is marked `(empty)`, and a trailing `# comment` from the note shows beside its key with the value redacted out — assignment-shaped text the parser rejected (`# OLD_KEY=…`, a mention mid-sentence) is masked the same way, so no value reaches the terminal. On a terminal, comments and the redaction markers render dim and keys stay bright; piped output and `NO_COLOR` are plain monochrome. `sns show <id> --raw` prints the note's full text instead.
 
 `sns copy <id> <key>` copies one setting's value. The key is matched exactly and case-sensitively; `API` does not select `API_KEY`. Only the byte count is printed:
 

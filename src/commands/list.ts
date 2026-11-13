@@ -38,7 +38,7 @@ export async function listCommand(options: {
         : options.type
           ? `of type ${options.type}`
           : "in the cache";
-      const label = env ? "no notes with env-style values" : "no notes";
+      const label = env ? "no notes with env-style settings" : "no notes";
       const hint = env ? " — see everything with sns list --all" : bare ? " — run sns sync" : "";
       console.log(`${label} ${where}${hint}`);
       return;
