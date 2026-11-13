@@ -1,4 +1,5 @@
-import { noteBody, noteHeader, noteScan, renderNoteInventory, resolveNote } from "../notes.ts";
+import pc from "picocolors";
+import { noteBody, noteHeader, noteScan, plainInventoryColor, renderNoteInventory, resolveNote } from "../notes.ts";
 import { page, pageIfTall } from "../pager.ts";
 import { openCache } from "./list.ts";
 
@@ -20,14 +21,17 @@ export async function showCommand(
     // inventory: the keys (with their trailing comments) and the prose the
     // parser skipped. No value reaches stdout — renderNoteInventory masks
     // assignment-shaped fragments in the prose — so a short inventory prints
-    // directly and never warns.
+    // directly and never warns. picocolors decides color support (tty,
+    // NO_COLOR, TERM=dumb); a pipe gets the plain palette.
+    const terminal = Boolean(process.stdout.isTTY);
     const text = renderNoteInventory({
       title: note.title,
       settings: scan.settings,
       comments: scan.comments,
       prose: scan.prose,
       query,
-      terminal: Boolean(process.stdout.isTTY),
+      terminal,
+      color: terminal && pc.isColorSupported ? pc : plainInventoryColor,
     });
     await pageIfTall(text, { warn: false });
   } finally {

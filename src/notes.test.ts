@@ -815,6 +815,40 @@ test("renderNoteInventory lists keys, marks empties, and hints the copy form", (
   expect(bare.split("\n")).toEqual(["t", "─", "DB_HOST=[redacted]", "TOKEN=  (empty)", "API_KEY=[redacted]"]);
 });
 
+test("renderNoteInventory draws annotation with the palette and strips note-supplied codes", () => {
+  const color = {
+    bold: (s: string) => `\x1b[1m${s}\x1b[0m`,
+    gray: (s: string) => `\x1b[90m${s}\x1b[0m`,
+    italic: (s: string) => `\x1b[3m${s}\x1b[0m`,
+  };
+  const text = renderNoteInventory({
+    title: "staging api",
+    settings: new Map([
+      ["DB_HOST", "x"],
+      ["TOKEN", ""],
+    ]),
+    comments: new Map([
+      ["DB_HOST", "# primary host"],
+      ["TOKEN", "# OLD_TOKEN=\x1b[31mhunter2\x1b[0m until Friday"],
+    ]),
+    prose: "",
+    query: "staging",
+    terminal: true,
+    color,
+  });
+  expect(text).toContain(`${color.bold("staging api")}`);
+  expect(text).toContain(`DB_HOST=${color.gray("[redacted]")}  ${color.italic(color.gray("# primary host"))}`);
+  expect(text).toContain("TOKEN=  \x1b[90m(empty)\x1b[0m");
+  // the note's own SGR is stripped before masking runs, so the code-hidden
+  // value is still caught — and none of their codes survive into our output
+  expect(text).toContain("OLD_TOKEN=[redacted] until Friday");
+  expect(text).not.toContain("\x1b[31m");
+  expect(text).not.toContain("hunter2");
+  // the hint stays plain text, consistent with hints elsewhere in the flow
+  expect(text).toContain("copy a value:  sns copy staging DB_HOST");
+  expect(text).not.toContain("\x1b[90mcopy a value:");
+});
+
 test("renderNoteInventory masks assignment-shaped fragments the parser rejected", () => {
   // a commented-out line and a mid-sentence mention carry values the parser
   // never parsed — the inventory still must not print them

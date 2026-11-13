@@ -506,14 +506,44 @@ export function shellish(text: string): string {
   return /^[A-Za-z0-9_.@:/-]+$/.test(text) ? text : `'${text.replaceAll("'", `'\\''`)}'`;
 }
 
+/**
+ * The palette the inventory draws with. Real palettes come from picocolors,
+ * which handles NO_COLOR, TERM=dumb, --no-color, and the tty check — so a
+ * pipe, a dumb terminal, or an explicit opt-out renders monochrome, and the
+ * whitespace-structural layout loses nothing. Draw with indexed ANSI (gray =
+ * bright black) so the terminal's theme-aware palette picks contrast.
+ */
+export type InventoryColor = {
+  bold(text: string): string;
+  gray(text: string): string;
+  italic(text: string): string;
+};
+
+/** The no-op palette: monochrome, for tests and unstyled callers. */
+export const plainInventoryColor: InventoryColor = {
+  bold: (text) => text,
+  gray: (text) => text,
+  italic: (text) => text,
+};
+
 /** Title with its ─ separator — the top of every show layout. */
-export function noteHeader(title: string): string {
-  return `${title}\n${"─".repeat(Math.min(title.length, 40))}`;
+export function noteHeader(title: string, color: InventoryColor = plainInventoryColor): string {
+  return `${color.bold(title)}\n${color.gray("─".repeat(Math.min(title.length, 40)))}`;
 }
 
-/** The pasteable hint that names the two-argument copy form with a real key. */
+/** The pasteable hint that names the two-argument copy form with a real key.
+ *  Plain text, like every other hint in the flow — only annotation dims. */
 function copyHint(query: string, firstKey: string): string {
   return `copy a value:  sns copy ${shellish(query)} ${firstKey}`;
+}
+
+/**
+ * Drop CSI escape sequences from note-derived text the inventory wraps in its
+ * own styling — a comment carrying codes could otherwise reset or restyle our
+ * line. Also done before masking so it sees what the codes were hiding.
+ */
+function stripSgr(text: string): string {
+  return text.replace(/\x1b\[[0-9;:?]*[A-Za-z]/g, "");
 }
 
 /**
@@ -533,8 +563,9 @@ function redactAssignments(text: string): string {
  * the value withheld (`KEY=[redacted]`, or `KEY=  (empty)` when the value is
  * empty) plus the trailing `#` comment when the note has one. Descriptive
  * text reads first, and the actionable keys sit last, directly above — on a
- * terminal only — the hint naming the copy form with a real key. Pure so
- * tests can pin the exact layout.
+ * terminal only — the hint naming the copy form with a real key. Keys, prose,
+ * and the hint stay plain text; comments and value markers dim via `color`,
+ * with the key names popping by contrast. Pure so tests can pin the layout.
  */
 export function renderNoteInventory(input: {
   title: string;
@@ -543,14 +574,20 @@ export function renderNoteInventory(input: {
   prose: string;
   query: string;
   terminal: boolean;
+  color?: InventoryColor;
 }): string {
-  const lines = [noteHeader(input.title)];
+  const color = input.color ?? plainInventoryColor;
+  const lines = [noteHeader(input.title, color)];
   const prose = redactAssignments(input.prose).replace(/\n+$/, "");
   if (prose.trim() !== "") lines.push(prose, "");
   for (const [key, value] of input.settings) {
-    const label = value === "" ? `${key}=  (empty)` : `${key}=[redacted]`;
+    const label = value === "" ? `${key}=  ${color.gray("(empty)")}` : `${key}=${color.gray("[redacted]")}`;
     const comment = input.comments.get(key);
-    lines.push(comment === undefined ? label : `${label}  ${redactAssignments(comment)}`);
+    lines.push(
+      comment === undefined
+        ? label
+        : `${label}  ${color.italic(color.gray(stripSgr(redactAssignments(comment))))}`,
+    );
   }
   if (input.terminal && input.settings.size > 0) {
     const firstKey = [...input.settings.keys()][0]!;
