@@ -13,6 +13,7 @@ import { showCommand } from "./commands/show.ts";
 import { syncCommand } from "./commands/sync.ts";
 import { UserError } from "./errors.ts";
 import { scrubProcessEnv } from "./env.ts";
+import { VERSION } from "./version.ts";
 
 scrubProcessEnv();
 maybeClearStaleClipboard();
@@ -21,7 +22,7 @@ const program = new Command();
 program
   .name("sns")
   .description("Read Standard Notes with an encrypted local cache")
-  .version("0.1.0")
+  .version(VERSION)
   .action(browseCommand);
 
 program.command("doctor").description("check runtime, keychain, session, and cache").action(async () => {
