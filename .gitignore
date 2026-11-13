@@ -5,6 +5,7 @@ bun.lock
 # output
 out
 dist
+rs/target
 
 # dotenv environment variable files
 .env
@@ -23,6 +24,12 @@ PLAN?.md
 .env.session
 .env.keys
 *.db
+!rs/tests/fixtures/cache-v0.2.0.db
 PLAN?.md
 CLAUDE.md
 AGENTS.md
+
+# extension (wxt): generated types and build output
+extension/.wxt
+extension/.output
+extension/*.tar.gz

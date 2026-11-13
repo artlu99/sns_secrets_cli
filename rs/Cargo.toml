@@ -1,0 +1,35 @@
+[package]
+name = "sns"
+version = "0.2.0"
+edition = "2024"
+description = "Standard Notes reader CLI — Rust rewrite of sn-secrets-cli"
+
+[dependencies]
+aes-gcm = "0.11.1"
+argon2 = "0.6.0"
+base64 = "0.23.1"
+chacha20poly1305 = "0.11.0"
+getrandom = "0.4.3"
+hex = "0.4.3"
+hkdf = "0.13.0"
+p256 = { version = "0.14.0", features = ["ecdh"] }
+reqwest = { version = "0.13.5", default-features = false, features = ["blocking", "rustls-no-provider"] }
+rusqlite = { version = "0.42.0", features = ["bundled"] }
+rustls = { version = "0.23.46", features = ["ring"] }
+serde = { version = "1.0.229", features = ["derive"] }
+serde_json = "1.0.154"
+sha2 = "0.11.1"
+zeroize = "1.9.1"
+
+# The bundled libsqlite3-sys amalgamation is swapped for SQLite3 Multiple
+# Ciphers (the upstream of better-sqlite3-multiple-ciphers), so the cache
+# keeps its chacha20 at-rest encryption with the same pragmas and defaults.
+# The vendored copy lives in rs/libsqlite3-sys/ — its sqlite3/ dir holds the
+# sqlite3mc amalgamation in place of stock sqlite3.
+[patch.crates-io]
+libsqlite3-sys = { path = "libsqlite3-sys" }
+
+# Argon2 with 64 MiB of memory is unusably slow in an unoptimized debug build;
+# test (and its dev-profile) runs get the same optimization level as release.
+[profile.test]
+opt-level = 2
