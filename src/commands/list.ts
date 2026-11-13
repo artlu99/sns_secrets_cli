@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
 import { UserError } from "../errors.ts";
 import { openDatabase, type CacheDb } from "../db.ts";
-import { listNotes, renderTagGroups, resolveTag, tagGraph, taggedNoteUuids } from "../notes.ts";
+import { listNotes, PROSE_TYPES, renderTagGroups, resolveTag, tagGraph, taggedNoteUuids } from "../notes.ts";
 import { dbPath } from "../paths.ts";
 import { loadSession } from "../session-file.ts";
 import { page } from "../pager.ts";
@@ -27,11 +27,20 @@ export async function listCommand(options: {
     const graph = tagGraph(db);
     const tag = options.tag ? resolveTag(graph, options.tag) : undefined;
     const tagUuids = tag ? taggedNoteUuids(graph, tag.uuid) : undefined;
-    const notes = listNotes(db, { type: options.type, limit, all: options.all, tagUuids });
+    // the default view is the secrets view: only notes whose prose carries
+    // env-style settings; --all and explicit non-prose type selectors escape it
+    const env = !options.all && (!options.type || PROSE_TYPES.has(options.type));
+    const notes = listNotes(db, { type: options.type, limit, all: options.all, tagUuids, env });
     if (notes.length === 0) {
-      if (options.tag) console.log(`no notes under tag ${JSON.stringify(options.tag)}`);
-      else if (options.type) console.log(`no notes of type ${options.type}`);
-      else console.log("no notes in the cache — run sns sync");
+      const bare = !options.tag && !options.type;
+      const where = options.tag
+        ? `under tag ${JSON.stringify(options.tag)}`
+        : options.type
+          ? `of type ${options.type}`
+          : "in the cache";
+      const label = env ? "no notes with env-style values" : "no notes";
+      const hint = env ? " — see everything with sns list --all" : bare ? " — run sns sync" : "";
+      console.log(`${label} ${where}${hint}`);
       return;
     }
     const table = renderTagGroups(graph, notes);

@@ -46,11 +46,11 @@ program.command("tags").description("list tags and folders (read-only)").action(
 
 program
   .command("list")
-  .description("list notes from the cache")
+  .description("list notes with env-style values (count per note; --all for everything)")
   .option("--type <content_type>", "filter by content type, e.g. Note")
   .option("--tag <name>", "only notes under this tag or folder")
   .option("--limit <n>", "max rows", "100")
-  .option("--all", "include key-bearing items")
+  .option("--all", "list everything, including key-bearing items")
   .action(listCommand);
 
 program

@@ -1,5 +1,6 @@
 import type { CacheDb, ItemRow } from "./db.ts";
 import { UserError } from "./errors.ts";
+import { parseNoteSettings } from "./note-env.ts";
 
 /** Key-bearing items are stored for decrypt and never listed. */
 export const HIDDEN_TYPES = new Set(["SN|ItemsKey", "SN|KeySystemItemsKey", "SN|KeySystemRootKey"]);
@@ -20,7 +21,26 @@ export type ListedNote = {
   updated_at: number;
   title: string;
   trashed: boolean;
+  /** env-style settings parsed from the note's prose body (0 when none). */
+  settings: number;
 };
+
+/** Content types whose prose `text` carries the env-style settings the list counts. */
+export const PROSE_TYPES = new Set(["Note"]);
+
+/**
+ * Env-style settings parsed from a row's prose body. Notes parse their
+ * `text`; anything else (and any unparseable content) has none.
+ */
+export function noteSettings(row: { content_type: string; content: string }): Map<string, string> {
+  if (!PROSE_TYPES.has(row.content_type)) return new Map();
+  try {
+    const parsed = JSON.parse(row.content) as { text?: unknown };
+    return typeof parsed.text === "string" ? parseNoteSettings(parsed.text) : new Map();
+  } catch {
+    return new Map();
+  }
+}
 
 /** Standard Notes keeps trashed notes in the account with `trashed: true` on the decrypted content. */
 export function isTrashed(content: string): boolean {
@@ -34,7 +54,7 @@ export function isTrashed(content: string): boolean {
 
 export function listNotes(
   db: CacheDb,
-  options: { type?: string; limit: number; all?: boolean; tagUuids?: Set<string> },
+  options: { type?: string; limit: number; all?: boolean; tagUuids?: Set<string>; env?: boolean },
 ): ListedNote[] {
   // No json_extract here: a cached row whose content is not valid JSON would
   // make SQLite raise mid-query and kill the whole listing. Trashed is
@@ -63,12 +83,16 @@ export function listNotes(
   for (const row of rows) {
     if (isTrashed(row.content)) continue;
     if (options.tagUuids && !options.tagUuids.has(row.uuid)) continue;
+    const settings = noteSettings(row).size;
+    // env view: the limit applies after filtering, so prose-only notes never crowd out a settings note
+    if (options.env && settings === 0) continue;
     listed.push({
       uuid: row.uuid,
       content_type: row.content_type,
       updated_at: row.updated_at,
       title: row.title ?? label(row),
       trashed: false,
+      settings,
     });
     if (listed.length >= options.limit) break;
   }
@@ -117,6 +141,7 @@ export function searchNotes(
       updated_at: row.updated_at,
       title: title || label(row),
       trashed: false,
+      settings: noteSettings(row).size,
       snippet: snippet(haystack, pattern, needle),
     });
     if (hits.length >= options.limit) break;
@@ -471,10 +496,11 @@ const UNTAGGED = "(untagged)";
 /**
  * Hierarchical `sns list`. Tags render as a forest — explicit SN folders win,
  * otherwise containment is inferred (see resolveParents) — and every listed
- * note is placed exactly once, under its deepest tag. Header counts come from
- * the notes argument (subtree totals), so --limit and --tag filters never
- * show a count for rows that are not listed. Tags with nothing under them are
- * left out (sns tags still shows them); untagged notes land in (untagged) last.
+ * note is placed exactly once, under its deepest tag. Rows carry the note's
+ * env-style setting count. Header counts come from the notes argument
+ * (subtree totals), so --limit, --tag, and env filtering never show a count
+ * for rows that are not listed. Tags with nothing under them are left out
+ * (sns tags still shows them); untagged notes land in (untagged) last.
  */
 export function renderTagGroups(graph: TagGraph, notes: ListedNote[]): string {
   const links = graph.links;
@@ -517,11 +543,13 @@ export function renderTagGroups(graph: TagGraph, notes: ListedNote[]): string {
   const widths = [
     Math.max(...notes.map((note) => note.title.replace(/\s+/g, " ").length), 5),
     Math.max(...notes.map((note) => formatWhen(note.updated_at).length), 16),
+    Math.max(...notes.map((note) => String(note.settings).length), 1),
   ];
   const row = (note: ListedNote, depth: number) =>
     `${"  ".repeat(depth + 1)}${[
       note.title.replace(/\s+/g, " ").padEnd(widths[0] ?? 0),
       formatWhen(note.updated_at).padEnd(widths[1] ?? 0),
+      String(note.settings).padStart(widths[2] ?? 0),
       note.uuid,
     ].join("  ").trimEnd()}`;
 

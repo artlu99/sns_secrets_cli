@@ -144,6 +144,68 @@ test("--all includes key-bearing rows; the default hides them", () => {
   }
 });
 
+test("the env view lists only notes carrying KEY=VALUE settings, with per-note counts", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sns-env-"));
+  const db = openDatabase(join(dir, "cache.db"), randomBytes(32).toString("hex"));
+  const creds = "eeeeeeee-1111-1111-1111-111111111111";
+  const cert = "eeeeeeee-2222-2222-2222-222222222222";
+  try {
+    upsertItems(db, [
+      {
+        uuid: creds,
+        content_type: "Note",
+        updated_at: 3_000,
+        deleted: 0,
+        title: "Creds",
+        content: JSON.stringify({
+          title: "Creds",
+          text: "staging secrets\n\nexport API_KEY=abc\nURL=https://x.test\nTOKEN=",
+        }),
+      },
+      {
+        uuid: cert,
+        content_type: "Note",
+        updated_at: 2_500,
+        deleted: 0,
+        title: "Cert",
+        content: JSON.stringify({ title: "Cert", text: 'CERT="-----BEGIN\nMIIE\n-----END-----"' }),
+      },
+      {
+        uuid: "eeeeeeee-3333-3333-3333-333333333333",
+        content_type: "Note",
+        updated_at: 2_000,
+        deleted: 0,
+        title: "Journal",
+        content: JSON.stringify({ title: "Journal", text: "thoughts, and 1+1=2 inline" }),
+      },
+      {
+        uuid: "eeeeeeee-4444-4444-4444-444444444444",
+        content_type: "Note",
+        updated_at: 1_500,
+        deleted: 0,
+        title: "TrashedCreds",
+        content: JSON.stringify({ title: "TrashedCreds", text: "OLD=1", trashed: true }),
+      },
+    ]);
+    const env = listNotes(db, { limit: 10, env: true });
+    expect(env.map((note) => note.title)).toEqual(["Creds", "Cert"]);
+    // export prefix, plain, and empty values all count; a multi-line quoted value counts once
+    expect(env.map((note) => note.settings)).toEqual([3, 1]);
+    // the default view and search still see prose-only notes
+    expect(listNotes(db, { limit: 10 }).map((note) => note.title)).toEqual(["Creds", "Cert", "Journal"]);
+    expect(searchNotes(db, "thoughts", { limit: 10 }).map((hit) => hit.title)).toEqual(["Journal"]);
+    // count column sits between the timestamp and the uuid
+    const table = renderTagGroups(tagGraph(db), env);
+    const lines = table.split("\n");
+    expect(lines.find((line) => line.includes("Creds"))?.endsWith(` 3  ${creds}`)).toBe(true);
+    expect(lines.find((line) => line.includes("Cert"))?.endsWith(` 1  ${cert}`)).toBe(true);
+    expect(table).toContain("(untagged) (2)");
+  } finally {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
 test("tags union both link sides and tolerate broken rows", () => {
   const dir = mkdtempSync(join(tmpdir(), "sns-tags-"));
   const db = openDatabase(join(dir, "cache.db"), randomBytes(32).toString("hex"));
