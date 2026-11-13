@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomBytes } from "node:crypto";
 import { openDatabase, upsertItems } from "./db.ts";
-import { listNotes, listTags, renderTagGroups, resolveTag, searchNotes, taggedNoteUuids } from "./notes.ts";
+import { listNotes, listTags, renderTagGroups, resolveTag, searchNotes, tagGraph, taggedNoteUuids } from "./notes.ts";
 import { renderTagTree } from "./commands/tags.ts";
 import { UserError } from "./errors.ts";
 
@@ -48,7 +48,7 @@ test("list hides trashed notes and non-note types", () => {
     ]);
     const notes = listNotes(db, { limit: 10 });
     expect(notes.map((note) => note.title)).toEqual(["Kept", "Open"]);
-    const table = renderTagGroups(db, notes);
+    const table = renderTagGroups(tagGraph(db), notes);
     expect(table).toContain("(untagged) (2)");
     const lines = table.split("\n");
     expect(lines.findIndex((line) => line.includes("Kept"))).toBeLessThan(
@@ -242,26 +242,26 @@ test("tags union both link sides and tolerate broken rows", () => {
     expect(tags.find((tag) => tag.title === "orphan")?.notes).toBe(0);
     expect(tags.find((tag) => tag.title === "broken")?.notes).toBe(0);
 
-    const euUuids = taggedNoteUuids(db, eu);
+    const euUuids = taggedNoteUuids(tagGraph(db), eu);
     expect(euUuids.has(noteA)).toBe(true);
     expect(euUuids.has(noteB)).toBe(false);
-    expect(taggedNoteUuids(db, "cccccccc-aaaa-dddd-dddd-dddddddddddd").size).toBe(0);
+    expect(taggedNoteUuids(tagGraph(db), "cccccccc-aaaa-dddd-dddd-dddddddddddd").size).toBe(0);
 
-    expect(resolveTag(db, prod).title).toBe("prod");
-    expect(resolveTag(db, "eu").title).toBe("eu");
+    expect(resolveTag(tagGraph(db), prod).title).toBe("prod");
+    expect(resolveTag(tagGraph(db), "eu").title).toBe("eu");
     // all four tags share the "cccccccc-aaaa" uuid prefix -> ambiguous
-    expect(() => resolveTag(db, "cccccccc-aaaa")).toThrow(/matches 4 tags/);
-    expect(() => resolveTag(db, "zzz")).toThrow(/no tag matches/);
+    expect(() => resolveTag(tagGraph(db), "cccccccc-aaaa")).toThrow(/matches 4 tags/);
+    expect(() => resolveTag(tagGraph(db), "zzz")).toThrow(/no tag matches/);
 
     const underEu = listNotes(db, { limit: 10, tagUuids: euUuids });
     expect(underEu.map((row) => row.title)).toEqual(["Alpha"]);
-    const underProd = listNotes(db, { limit: 10, tagUuids: taggedNoteUuids(db, prod) });
+    const underProd = listNotes(db, { limit: 10, tagUuids: taggedNoteUuids(tagGraph(db), prod) });
     expect(underProd.map((row) => row.title)).toEqual(["Alpha", "Beta"]);
 
     // hierarchical list: Alpha lives once, under eu (its deepest tag), nested
     // in prod; noteless tags (broken, orphan, deleted) do not render at all
     const listed = listNotes(db, { limit: 10 });
-    const table = renderTagGroups(db, listed);
+    const table = renderTagGroups(tagGraph(db), listed);
     const lines = table.split("\n");
     expect(lines[0]).toBe("prod (2)");
     expect(lines[1]).toContain("Beta");
@@ -286,13 +286,14 @@ test("renderTagTree nests children and aligns counts", () => {
     { uuid: "loop-b", title: "loop-b", parent: "loop-a", notes: 0 },
   ];
   const lines = renderTagTree(tags).split("\n");
-  expect(lines[0]).toBe("prod    (2 notes)");
-  expect(lines[1]).toBe("  eu    (1 note)");
-  expect(lines[2]).toBe("  apac  (empty)");
-  expect(lines[3]).toBe("misc    (5 notes)");
-  // cycle members fall back to the flat list at the end
-  expect(lines).toContain("loop-a  (empty)");
-  expect(lines).toContain("loop-b  (empty)");
+  expect(lines[0]).toBe("prod      (2 notes)");
+  // children are sorted alphabetically, not by input order
+  expect(lines[1]).toBe("  apac    (empty)");
+  expect(lines[2]).toBe("  eu      (1 note)");
+  expect(lines[3]).toBe("misc      (5 notes)");
+  // parent cycles hang off their cycle root as one chain, after the clean tree
+  expect(lines).toContain("loop-a    (empty)");
+  expect(lines).toContain("  loop-b  (empty)");
 });
 
 test("list infers the hierarchy from note membership and renders each note once", () => {
@@ -345,7 +346,7 @@ test("list infers the hierarchy from note membership and renders each note once"
     expect(tags.find((t) => t.title === "social")?.parent).toBe(tags.find((t) => t.title === "apps")?.uuid);
     expect(tags.find((t) => t.title === "infra")?.parent).toBeNull();
 
-    const table = renderTagGroups(db, listNotes(db, { limit: 10 }));
+    const table = renderTagGroups(tagGraph(db), listNotes(db, { limit: 10 }));
     const lines = table.split("\n");
     // headers: alphabetical at each level, counts are full tag membership
     expect(lines[0]).toBe("apps (1)");
@@ -435,7 +436,7 @@ test("an explicit folder wins over the inferred parent, untagged notes render la
     ]);
     expect(listTags(db).find((t) => t.title === "leaf")?.parent).toBe(big);
 
-    const table = renderTagGroups(db, listNotes(db, { limit: 10 }));
+    const table = renderTagGroups(tagGraph(db), listNotes(db, { limit: 10 }));
     const lines = table.split("\n");
     // counts are subtree totals over the listed notes: big has none directly,
     // but its child chain lists one
@@ -543,7 +544,7 @@ test("hard-deleted and trashed notes stop counting toward tags", () => {
     ]);
     const workTag = listTags(db).find((tag) => tag.title === "work");
     expect(workTag?.notes).toBe(1);
-    const uuids = taggedNoteUuids(db, work);
+    const uuids = taggedNoteUuids(tagGraph(db), work);
     expect(uuids.has(live)).toBe(true);
     expect(uuids.has(dead)).toBe(false);
     expect(uuids.has(trashed)).toBe(false);
@@ -597,7 +598,7 @@ test("list --tag on a folder reaches notes under its child tags", () => {
       },
     ]);
     // the list renders the note under big -> leaf; --tag big must find it too
-    const uuids = taggedNoteUuids(db, folder);
+    const uuids = taggedNoteUuids(tagGraph(db), folder);
     expect(uuids.has(note)).toBe(true);
     expect(listNotes(db, { limit: 10, tagUuids: uuids }).map((row) => row.title)).toEqual(["child"]);
   } finally {
@@ -646,7 +647,7 @@ test("header counts reflect the listed notes, not the whole cache", () => {
       },
     ]);
     // --limit cut Beta out: the header must not claim it
-    const table = renderTagGroups(db, listNotes(db, { limit: 1 }));
+    const table = renderTagGroups(tagGraph(db), listNotes(db, { limit: 1 }));
     expect(table.split("\n")[0]).toBe("prod (1)");
     expect(table).not.toContain("Beta");
   } finally {
@@ -679,11 +680,11 @@ test("tag titles are whitespace-normalized for rendering and matching", () => {
         content: JSON.stringify({ title: "child", references: [{ uuid: messy, content_type: "Tag" }] }),
       },
     ]);
-    const table = renderTagGroups(db, listNotes(db, { limit: 10 }));
+    const table = renderTagGroups(tagGraph(db), listNotes(db, { limit: 10 }));
     expect(table.split("\n")[0]).toBe("a b (1)");
     expect(table).not.toContain("a\nb");
     // resolution matches the normalized title too
-    expect(resolveTag(db, "a b").uuid).toBe(messy);
+    expect(resolveTag(tagGraph(db), "a b").uuid).toBe(messy);
   } finally {
     db.close();
     rmSync(dir, { recursive: true, force: true });

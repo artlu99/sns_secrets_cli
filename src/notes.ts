@@ -140,33 +140,57 @@ function snippet(haystack: string, pattern: RegExp | null, needle: string): stri
   return `${start > 0 ? "…" : ""}${slice}${end < flat.length ? "…" : ""}`.slice(0, 80);
 }
 
+/**
+ * One prefix resolver for notes and tags: exact uuid, then uuid prefix (when
+ * the query looks like one), then unique title prefix. Ambiguity is an error
+ * listing the first few matches; `kind` is singular ("note", "tag").
+ */
+function resolveByPrefix<T>(
+  items: T[],
+  query: string,
+  kind: string,
+  key: (item: T) => { uuid: string; title: string },
+): T {
+  const exact = items.find((item) => key(item).uuid === query);
+  if (exact) return exact;
+  if (/^[0-9a-fA-F-]{8,}$/.test(query)) {
+    const lowered = query.toLowerCase();
+    const byPrefix = items.filter((item) => key(item).uuid.toLowerCase().startsWith(lowered));
+    if (byPrefix.length === 1) return byPrefix[0]!;
+    if (byPrefix.length > 1) throw ambiguousItems(byPrefix, kind, key);
+  }
+  const prefix = query.toLowerCase();
+  const byTitle = items.filter((item) => key(item).title.toLowerCase().startsWith(prefix));
+  if (byTitle.length === 1) return byTitle[0]!;
+  if (byTitle.length > 1) throw ambiguousItems(byTitle, kind, key);
+  throw new UserError(`no ${kind} matches ${JSON.stringify(query)}`);
+}
+
+function ambiguousItems<T>(
+  matches: T[],
+  kind: string,
+  key: (item: T) => { uuid: string; title: string },
+): UserError {
+  const sample = matches
+    .slice(0, 8)
+    .map((item) => {
+      const entry = key(item);
+      return `${entry.uuid.slice(0, 8)}  ${entry.title}`;
+    })
+    .join("\n");
+  return new UserError(`that matches ${matches.length} ${kind}s; be more specific:\n${sample}`);
+}
+
 export function resolveNote(db: CacheDb, query: string, options: { all?: boolean } = {}): ItemRow {
   const rows = db
     .prepare("SELECT uuid, content_type, updated_at, deleted, title, content FROM items WHERE deleted = 0")
     .all() as ItemRow[];
   const visibleTypes = new Set(["Note", ...(options.all ? HIDDEN_TYPES : [])]);
   const visible = rows.filter((row) => visibleTypes.has(row.content_type) && !isTrashed(row.content));
-  const exact = visible.find((row) => row.uuid === query);
-  if (exact) return exact;
-  if (/^[0-9a-fA-F-]{8,}$/.test(query)) {
-    const lowered = query.toLowerCase();
-    const byPrefix = visible.filter((row) => row.uuid.toLowerCase().startsWith(lowered));
-    if (byPrefix.length === 1) return byPrefix[0]!;
-    if (byPrefix.length > 1) throw ambiguous(byPrefix);
-  }
-  const prefix = query.toLowerCase();
-  const byTitle = visible.filter((row) => (row.title ?? "").toLowerCase().startsWith(prefix));
-  if (byTitle.length === 1) return byTitle[0]!;
-  if (byTitle.length > 1) throw ambiguous(byTitle);
-  throw new UserError(`no note matches ${JSON.stringify(query)}`);
-}
-
-function ambiguous(rows: ItemRow[]): UserError {
-  const sample = rows
-    .slice(0, 8)
-    .map((row) => `${row.uuid.slice(0, 8)}  ${row.title ?? "(untitled)"}`)
-    .join("\n");
-  return new UserError(`that matches ${rows.length} notes; be more specific:\n${sample}`);
+  return resolveByPrefix(visible, query, "note", (row) => ({
+    uuid: row.uuid,
+    title: row.title ?? "(untitled)",
+  }));
 }
 
 /** Tag→note and tag→parent links live in the encrypted content's references array. */
@@ -198,6 +222,12 @@ type TagLinks = {
   titleOf: Map<string, string>;
   parentOf: Map<string, string | null>;
   tagToNotes: Map<string, Set<string>>;
+};
+
+/** The tag graph, resolved once per command: links plus inferred/explicit parents. */
+export type TagGraph = {
+  links: TagLinks;
+  parentOf: Map<string, string | null>;
 };
 
 /** Tag titles render and resolve everywhere, so whitespace is normalized once here. */
@@ -246,6 +276,15 @@ function tagLinks(db: CacheDb): TagLinks {
   return { titleOf, parentOf, tagToNotes };
 }
 
+/** The full tag graph: query it once, pass it everywhere. */
+export function tagGraph(db: CacheDb): TagGraph {
+  const links = tagLinks(db);
+  return { links, parentOf: resolveParents(links) };
+}
+
+const titleComparator = (titleOf: Map<string, string>) => (a: string, b: string) =>
+  (titleOf.get(a) ?? "").localeCompare(titleOf.get(b) ?? "") || a.localeCompare(b);
+
 /**
  * Explicit parents (SN folders) win. Otherwise nesting is inferred from note
  * membership: a tag whose notes all also sit in another tag nests under the
@@ -256,8 +295,7 @@ function tagLinks(db: CacheDb): TagLinks {
 function resolveParents(links: TagLinks): Map<string, string | null> {
   const tags = [...links.titleOf.keys()];
   const parentOf = new Map<string, string | null>();
-  const byTitle = (a: string, b: string) =>
-    (links.titleOf.get(a) ?? "").localeCompare(links.titleOf.get(b) ?? "") || a.localeCompare(b);
+  const byTitle = titleComparator(links.titleOf);
   for (const tag of tags) {
     const explicit = links.parentOf.get(tag);
     // check the INPUT map: parentOf (output) is half-built at this point, so
@@ -300,7 +338,7 @@ function resolveParents(links: TagLinks): Map<string, string | null> {
 }
 
 /** Depth per tag, cutting explicit-parent cycles at the first revisit. */
-function tagDepths(titleOf: Map<string, string>, parentOf: Map<string, string | null>): Map<string, number> {
+function tagDepths(parentOf: Map<string, string | null>): Map<string, number> {
   const depthOf = new Map<string, number>();
   const depth = (tag: string): number => {
     const cached = depthOf.get(tag);
@@ -311,14 +349,58 @@ function tagDepths(titleOf: Map<string, string>, parentOf: Map<string, string | 
     depthOf.set(tag, result);
     return result;
   };
-  for (const tag of titleOf.keys()) depth(tag);
+  for (const tag of parentOf.keys()) depth(tag);
   return depthOf;
+}
+
+/**
+ * The forest both tag renderers draw: cycle-cut depths, children lists, and
+ * root detection. A tag is a root when it has no live parent (dangling links
+ * included) or when its parent chain loops back through it — a parent cycle
+ * renders as one chain hanging off each of its members. `cycleRoot` says
+ * which kind of root a tag is, so renderers can present cycles last.
+ */
+export function tagForest(parentOf: Map<string, string | null>): {
+  depthOf: Map<string, number>;
+  childrenOf: Map<string, string[]>;
+  isRoot: (tag: string) => boolean;
+  cycleRoot: (tag: string) => boolean;
+} {
+  const childrenOf = new Map<string, string[]>();
+  for (const [tag, parent] of parentOf) {
+    if (parent === null || !parentOf.has(parent)) continue;
+    const kids = childrenOf.get(parent) ?? [];
+    kids.push(tag);
+    childrenOf.set(parent, kids);
+  }
+  const depthOf = tagDepths(parentOf);
+  const isRoot = (tag: string): boolean => {
+    const parent = parentOf.get(tag);
+    if (parent === null || parent === undefined || !parentOf.has(parent)) return true;
+    let current: string | null = parent;
+    const seen = new Set<string>();
+    while (current !== null && parentOf.has(current) && !seen.has(current)) {
+      if (current === tag) return true; // the parent chain loops through this tag
+      seen.add(current);
+      current = parentOf.get(current) ?? null;
+    }
+    return false;
+  };
+  const cycleRoot = (tag: string): boolean => {
+    if (!isRoot(tag)) return false;
+    const parent = parentOf.get(tag);
+    return parent !== null && parent !== undefined && parentOf.has(parent);
+  };
+  return { depthOf, childrenOf, isRoot, cycleRoot };
 }
 
 /** Read-only view of tags: title, resolved parent tag, and note count. */
 export function listTags(db: CacheDb): ListedTag[] {
-  const links = tagLinks(db);
-  const parentOf = resolveParents(links);
+  return tagsOf(tagGraph(db));
+}
+
+function tagsOf(graph: TagGraph): ListedTag[] {
+  const { links, parentOf } = graph;
   const tags: ListedTag[] = [...links.titleOf].map(([uuid, title]) => ({
     uuid,
     title,
@@ -333,14 +415,12 @@ export function listTags(db: CacheDb): ListedTag[] {
  * Note uuids under a tag or folder: the subtree's membership, so
  * `sns list --tag <folder>` finds notes that sit in its child tags.
  */
-export function taggedNoteUuids(db: CacheDb, tagUuid: string): Set<string> {
-  const links = tagLinks(db);
-  const parentOf = resolveParents(links);
+export function taggedNoteUuids(graph: TagGraph, tagUuid: string): Set<string> {
   const subtree = new Set<string>([tagUuid]);
   let grew = true;
   while (grew) {
     grew = false;
-    for (const [tag, parent] of parentOf) {
+    for (const [tag, parent] of graph.parentOf) {
       if (parent !== null && subtree.has(parent) && !subtree.has(tag)) {
         subtree.add(tag);
         grew = true;
@@ -349,31 +429,13 @@ export function taggedNoteUuids(db: CacheDb, tagUuid: string): Set<string> {
   }
   const uuids = new Set<string>();
   for (const tag of subtree) {
-    for (const uuid of links.tagToNotes.get(tag) ?? []) uuids.add(uuid);
+    for (const uuid of graph.links.tagToNotes.get(tag) ?? []) uuids.add(uuid);
   }
   return uuids;
 }
 
-export function resolveTag(db: CacheDb, query: string): ListedTag {
-  const tags = listTags(db);
-  const exact = tags.find((tag) => tag.uuid === query);
-  if (exact) return exact;
-  if (/^[0-9a-fA-F-]{8,}$/.test(query)) {
-    const lowered = query.toLowerCase();
-    const byPrefix = tags.filter((tag) => tag.uuid.toLowerCase().startsWith(lowered));
-    if (byPrefix.length === 1) return byPrefix[0]!;
-    if (byPrefix.length > 1) throw ambiguousTags(byPrefix);
-  }
-  const prefix = query.toLowerCase();
-  const byTitle = tags.filter((tag) => tag.title.toLowerCase().startsWith(prefix));
-  if (byTitle.length === 1) return byTitle[0]!;
-  if (byTitle.length > 1) throw ambiguousTags(byTitle);
-  throw new UserError(`no tag matches ${JSON.stringify(query)}`);
-}
-
-function ambiguousTags(tags: ListedTag[]): UserError {
-  const sample = tags.slice(0, 8).map((tag) => `${tag.uuid.slice(0, 8)}  ${tag.title}`).join("\n");
-  return new UserError(`that matches ${tags.length} tags; be more specific:\n${sample}`);
+export function resolveTag(graph: TagGraph, query: string): ListedTag {
+  return resolveByPrefix(tagsOf(graph), query, "tag", (tag) => ({ uuid: tag.uuid, title: tag.title }));
 }
 
 export function noteBody(row: ItemRow): { title: string; body: string } {
@@ -414,21 +476,13 @@ const UNTAGGED = "(untagged)";
  * show a count for rows that are not listed. Tags with nothing under them are
  * left out (sns tags still shows them); untagged notes land in (untagged) last.
  */
-export function renderTagGroups(db: CacheDb, notes: ListedNote[]): string {
-  const links = tagLinks(db);
-  const parentOf = resolveParents(links);
-  const depthOf = tagDepths(links.titleOf, parentOf);
-  const byTitle = (a: string, b: string) =>
-    (links.titleOf.get(a) ?? "").localeCompare(links.titleOf.get(b) ?? "") || a.localeCompare(b);
+export function renderTagGroups(graph: TagGraph, notes: ListedNote[]): string {
+  const links = graph.links;
+  const parentOf = graph.parentOf;
+  const { depthOf, childrenOf, isRoot } = tagForest(parentOf);
+  const byTitle = titleComparator(links.titleOf);
   const byRecency = (a: ListedNote, b: ListedNote) => b.updated_at - a.updated_at || a.uuid.localeCompare(b.uuid);
 
-  const childrenOf = new Map<string, string[]>();
-  for (const [tag, parent] of parentOf) {
-    if (parent === null || !parentOf.has(parent)) continue;
-    const kids = childrenOf.get(parent) ?? [];
-    kids.push(tag);
-    childrenOf.set(parent, kids);
-  }
   for (const kids of childrenOf.values()) kids.sort(byTitle);
 
   // Each note's home is its deepest tag; ties go to the alphabetically first.
@@ -470,20 +524,6 @@ export function renderTagGroups(db: CacheDb, notes: ListedNote[]): string {
       formatWhen(note.updated_at).padEnd(widths[1] ?? 0),
       note.uuid,
     ].join("  ").trimEnd()}`;
-
-  // Roots are tags with no (live) parent, plus members of a parent cycle.
-  const isRoot = (tag: string): boolean => {
-    const parent = parentOf.get(tag);
-    if (parent === null || parent === undefined || !parentOf.has(parent)) return true;
-    let current: string | null = parent;
-    const seen = new Set<string>();
-    while (current !== null && parentOf.has(current) && !seen.has(current)) {
-      if (current === tag) return true; // the parent chain loops through this tag
-      seen.add(current);
-      current = parentOf.get(current) ?? null;
-    }
-    return false;
-  };
 
   // A block is [header, rows…, child blocks…]; null when nothing shows under it.
   const emitted = new Set<string>();

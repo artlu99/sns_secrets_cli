@@ -31,12 +31,14 @@ CREATE TABLE IF NOT EXISTS sync_state (
 );
 `;
 
-const MIGRATIONS: Array<{ name: string; sql: string }> = [
-  {
-    name: "sync_state.stored_types",
-    sql: "ALTER TABLE sync_state ADD COLUMN stored_types TEXT",
-  },
-];
+/**
+ * Schema migrations beyond SCHEMA, applied in order on every open. Progress is
+ * tracked in PRAGMA user_version, so each statement runs at most once per
+ * cache file. Caches written by builds that applied a migration without
+ * recording it (pre-user_version) hit "duplicate column name" on reopen —
+ * tolerated below, since it means the migration already ran.
+ */
+const MIGRATIONS: string[] = ["ALTER TABLE sync_state ADD COLUMN stored_types TEXT"];
 
 /**
  * True only for "this file is not a database we can read" — a wrong key or a
@@ -61,20 +63,17 @@ export function openDatabase(path: string, dbKey: string): CacheDb {
     db.pragma("busy_timeout = 5000");
     db.prepare("SELECT count(*) AS n FROM sqlite_master").get();
     db.exec(SCHEMA);
-    for (const migration of MIGRATIONS) {
-      const [table, column] = migration.name.split(".");
-      const columns = db.prepare("SELECT name FROM pragma_table_info(?)").all(table) as Array<{
-        name: string;
-      }>;
-      if (columns.some((existing) => existing.name === column)) continue;
+    const applied = Number(db.pragma("user_version", { simple: true }) ?? 0);
+    for (let index = applied; index < MIGRATIONS.length; index++) {
       try {
-        db.exec(migration.sql);
+        db.exec(MIGRATIONS[index]!);
       } catch (error) {
-        // two processes can pass the probe before either ALTER commits; the
-        // loser's "duplicate column" means the migration already ran
+        // already applied by an older build that tracked nothing, or by a
+        // concurrent opener that passed the version read before committing
         if (!(error instanceof Error) || !/duplicate column name/i.test(error.message)) throw error;
       }
     }
+    if (applied !== MIGRATIONS.length) db.pragma(`user_version = ${MIGRATIONS.length}`);
   } catch (error) {
     db.close();
     if (error instanceof UserError) throw error;

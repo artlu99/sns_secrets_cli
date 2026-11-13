@@ -4,7 +4,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomBytes } from "node:crypto";
 import { countItems, openDatabase, readSyncState, writeSyncState } from "./db.ts";
-import { listNotes, listTags, noteBody, resolveNote, searchNotes, taggedNoteUuids } from "./notes.ts";
+import { listNotes, listTags, noteBody, resolveNote, searchNotes, tagGraph, taggedNoteUuids } from "./notes.ts";
 import { canonicalJson, encrypt004 } from "./sn-crypto/004.ts";
 import type { EncryptedItem } from "./sn-crypto/004.ts";
 import { runSync, STORED_TYPES_VERSION, toUnixMs } from "./sync-engine.ts";
@@ -128,8 +128,8 @@ test("sync writes decrypted notes, then an incremental pull is empty", async () 
 
     const tags = listTags(db);
     expect(tags.map((tag) => [tag.title, tag.parent, tag.notes])).toEqual([["prod", null, 1]]);
-    expect([...taggedNoteUuids(db, tagId)]).toEqual([noteId]);
-    const tagged = listNotes(db, { limit: 10, tagUuids: taggedNoteUuids(db, tagId) });
+    expect([...taggedNoteUuids(tagGraph(db), tagId)]).toEqual([noteId]);
+    const tagged = listNotes(db, { limit: 10, tagUuids: taggedNoteUuids(tagGraph(db), tagId) });
     expect(tagged.map((row) => row.title)).toEqual(["Pins"]);
 
     const second = await runSync({

@@ -55,3 +55,34 @@ test("only not-a-database failures count as wrong key", () => {
   expect(isWrongKeyDatabase(ioerr)).toBe(false);
   expect(isWrongKeyDatabase("not an error object")).toBe(false);
 });
+
+test("migrations run once and tolerate caches that applied them unrecorded", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sns-db-migrate-"));
+  const path = join(dir, "cache.db");
+  const key = randomBytes(32).toString("hex");
+  try {
+    const db = openDatabase(path, key);
+    expect(db.pragma("user_version", { simple: true })).toBe(1);
+    db.close();
+
+    // reopen is a no-op: user_version already says every migration ran
+    const again = openDatabase(path, key);
+    expect(again.pragma("user_version", { simple: true })).toBe(1);
+    again.close();
+
+    // a cache from a build that added the column without recording it: the
+    // ALTER fails with duplicate column and must not surface as an error
+    const legacy = openDatabase(path, key);
+    legacy.pragma("user_version = 0");
+    legacy.close();
+    const migrated = openDatabase(path, key);
+    expect(migrated.pragma("user_version", { simple: true })).toBe(1);
+    const columns = migrated.prepare("SELECT name FROM pragma_table_info('sync_state')").all() as Array<{
+      name: string;
+    }>;
+    expect(columns.some((column) => column.name === "stored_types")).toBe(true);
+    migrated.close();
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

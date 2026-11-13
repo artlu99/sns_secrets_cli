@@ -1,7 +1,7 @@
 import { existsSync } from "node:fs";
 import { UserError } from "../errors.ts";
 import { openDatabase, type CacheDb } from "../db.ts";
-import { listNotes, renderTagGroups, resolveTag, taggedNoteUuids } from "../notes.ts";
+import { listNotes, renderTagGroups, resolveTag, tagGraph, taggedNoteUuids } from "../notes.ts";
 import { dbPath } from "../paths.ts";
 import { loadSession } from "../session-file.ts";
 import { page } from "../pager.ts";
@@ -23,7 +23,10 @@ export async function listCommand(options: {
   if (!Number.isInteger(limit) || limit < 1) throw new UserError("--limit must be a positive integer");
   const db = await openCache();
   try {
-    const tagUuids = options.tag ? taggedNoteUuids(db, resolveTag(db, options.tag).uuid) : undefined;
+    // one graph for resolution, filtering, and rendering
+    const graph = tagGraph(db);
+    const tag = options.tag ? resolveTag(graph, options.tag) : undefined;
+    const tagUuids = tag ? taggedNoteUuids(graph, tag.uuid) : undefined;
     const notes = listNotes(db, { type: options.type, limit, all: options.all, tagUuids });
     if (notes.length === 0) {
       if (options.tag) console.log(`no notes under tag ${JSON.stringify(options.tag)}`);
@@ -31,7 +34,7 @@ export async function listCommand(options: {
       else console.log("no notes in the cache — run sns sync");
       return;
     }
-    const table = renderTagGroups(db, notes);
+    const table = renderTagGroups(graph, notes);
     const rows = table.split("\n").length;
     const screen = process.stdout.rows ?? 24;
     if (process.stdout.isTTY && rows > screen - 1) await page(table);
