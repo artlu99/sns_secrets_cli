@@ -64,17 +64,19 @@ program
 
 program
   .command("show")
-  .description("show a note in a pager (stdin; nothing is written to disk)")
+  .description("show a note's setting keys and prose (values stay in the cache)")
   .argument("<id>", "uuid or title prefix")
-  .option("--no-pager", "print plaintext to stdout")
-  .action(async (id: string, options: { pager?: boolean }) => {
-    await showCommand(id, { noPager: options.pager === false });
+  .option("--no-pager", "print output to stdout")
+  .option("--raw", "print the full note body, setting values included")
+  .action(async (id: string, options: { pager?: boolean; raw?: boolean }) => {
+    await showCommand(id, { noPager: options.pager === false, raw: options.raw });
   });
 
 program
   .command("copy")
-  .description("copy a note to the clipboard via OSC 52; clears in 30s")
+  .description("copy one setting value to the clipboard via OSC 52; clears in 30s")
   .argument("<id>", "uuid or title prefix")
+  .argument("[key]", "exact setting name; omit to list the note's keys")
   .action(copyCommand);
 
 program.parseAsync(process.argv).catch((error: unknown) => {

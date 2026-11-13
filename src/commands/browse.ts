@@ -1,8 +1,8 @@
 import { intro, outro, select } from "@clack/prompts";
-import { copyToClipboard } from "../clipboard.ts";
-import { listNotes, noteBody, resolveNote, searchNotes } from "../notes.ts";
+import { listNotes, noteBody, planCopy, resolveNote, searchNotes } from "../notes.ts";
 import { page } from "../pager.ts";
 import { openCache } from "./list.ts";
+import { runCopyPlan } from "./copy.ts";
 import { promptLine, unwrap } from "./prompt.ts";
 
 export async function browseCommand(): Promise<void> {
@@ -45,7 +45,9 @@ export async function browseCommand(): Promise<void> {
       const row = resolveNote(db, selected, { all: false });
       const note = noteBody(row);
       if (action === "view") await page(`${note.title}\n\n${note.body}`);
-      if (action === "copy") console.log(await copyToClipboard(note.body));
+      // the same plan as `sns copy`: on a settings note the picker copies one
+      // chosen value, never the whole body
+      if (action === "copy") await runCopyPlan(note.title, planCopy(row, undefined));
     }
   } finally {
     db.close();

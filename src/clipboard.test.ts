@@ -1,3 +1,5 @@
+import { type StdioOptions, spawn } from "node:child_process";
+import { closeSync, openSync } from "node:fs";
 import { expect, test } from "bun:test";
 import { clearSequence, osc52 } from "./clipboard.ts";
 
@@ -20,3 +22,36 @@ test("OSC 52 carries base64, not the note, and clears to an empty payload", () =
     else process.env.TMUX = previous;
   }
 });
+
+function hasControllingTty(): boolean {
+  try {
+    closeSync(openSync("/dev/tty", "w"));
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/** Exit code of a setsid-detached one-liner; -1 if it could not even start. */
+function detachedExit(script: string, stdio: StdioOptions): Promise<number> {
+  return new Promise((resolve) => {
+    const child = spawn("sh", ["-c", script], { detached: true, stdio });
+    child.on("error", () => resolve(-1));
+    child.on("close", (code) => resolve(code ?? -1));
+  });
+}
+
+test.skipIf(!hasControllingTty())(
+  "the clear sleeper needs an inherited tty fd: setsid detaches /dev/tty",
+  async () => {
+    const ttyFd = openSync("/dev/tty", "w");
+    try {
+      // what armClear does: the tty opened before setsid stays writable in the child
+      expect(await detachedExit('printf %s "$1" >&3', ["ignore", "ignore", "ignore", ttyFd])).toBe(0);
+      // why the fd must be handed over: a detached child cannot reopen /dev/tty
+      expect(await detachedExit("printf %s x > /dev/tty", "ignore")).not.toBe(0);
+    } finally {
+      closeSync(ttyFd);
+    }
+  },
+);

@@ -1,5 +1,5 @@
 import { listTags, tagForest, type ListedTag } from "../notes.ts";
-import { page } from "../pager.ts";
+import { pageIfTall } from "../pager.ts";
 import { openCache } from "./list.ts";
 
 /**
@@ -61,10 +61,7 @@ export async function tagsCommand(): Promise<void> {
       return;
     }
     const tree = renderTagTree(tags);
-    const rows = tree.split("\n").length;
-    const screen = process.stdout.rows ?? 24;
-    if (process.stdout.isTTY && rows > screen - 1) await page(tree);
-    else console.log(tree);
+    await pageIfTall(tree);
   } finally {
     db.close();
   }

@@ -41,12 +41,23 @@ export function writeOsc(sequence: string): boolean {
 function armClear(sequence: string): void {
   ensureConfigDir();
   writeFileSync(clipboardMarkerPath(), String(Date.now() + 30_000), { mode: 0o600 });
-  const child = spawn("sh", ["-c", "sleep 30; printf %s \"$1\" > /dev/tty 2>/dev/null || true", "sns-clear", sequence], {
+  // A detached (setsid) sleeper has no controlling terminal, so it cannot open
+  // /dev/tty itself (ENXIO) — that silently swallowed every clear. Open the tty
+  // here and hand the fd to the child; Bun passes inherited fds renumbered to
+  // their stdio index, so the sleeper writes >&3.
+  let ttyFd: number;
+  try {
+    ttyFd = openSync("/dev/tty", "w");
+  } catch {
+    return; // no tty now; the marker lets a later command clear instead
+  }
+  const child = spawn("sh", ["-c", "sleep 30; printf %s \"$1\" >&3 || true", "sns-clear", sequence], {
     detached: true,
     env: scrubbedEnv(),
-    stdio: "ignore",
+    stdio: ["ignore", "ignore", "ignore", ttyFd],
   });
   child.unref();
+  closeSync(ttyFd);
 }
 
 async function copyViaTool(text: string): Promise<boolean> {
@@ -73,10 +84,10 @@ async function copyViaTool(text: string): Promise<boolean> {
   return false;
 }
 
-export async function copyToClipboard(text: string): Promise<string> {
+export async function copyToClipboard(text: string, subject?: string): Promise<string> {
   const bytes = Buffer.byteLength(text);
   if (bytes > MAX_BYTES) {
-    throw new UserError(`note is ${bytes} bytes, over the ${MAX_BYTES} byte clipboard cap`);
+    throw new UserError(`${subject ?? "note"} is ${bytes} bytes, over the ${MAX_BYTES} byte clipboard cap`);
   }
   const wrote = writeOsc(osc52(text));
   if (!wrote) {
@@ -86,7 +97,10 @@ export async function copyToClipboard(text: string): Promise<string> {
     }
   }
   armClear(clearSequence());
-  return `Copied ${bytes} bytes (clears in 30s)`;
+  // a subject names the copied setting; the body copy stays anonymous
+  return subject !== undefined
+    ? `copied ${subject} (${bytes} bytes, clears in 30s)`
+    : `Copied ${bytes} bytes (clears in 30s)`;
 }
 
 /** Next command clears a clipboard whose sleeper may have died. */

@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { parseNoteSettings } from "./note-env.ts";
+import { parseNoteSettings, scanNote } from "./note-env.ts";
 
 test("extracts KEY=VALUE settings and ignores the prose around them", () => {
   const note = [
@@ -65,6 +65,25 @@ test("comments: whitespace-preceded # ends an unquoted value; bare # is literal;
   expect(parseNoteSettings("plain=v#1").get("plain")).toBe("v#1");
   expect(parseNoteSettings('plain="a # b"').get("plain")).toBe("a # b");
   expect(parseNoteSettings('plain="a" # note').get("plain")).toBe("a");
+});
+
+test("scanNote keeps each assignment's comment, keyed like the settings", () => {
+  const scan = scanNote('user=pass  # shared account\nplain=# starts with hash\nTOKEN="a # b"  # rotated\nquiet="x" B=y\n');
+  expect(scan.comments.get("user")).toBe("# shared account");
+  expect(scan.comments.get("plain")).toBe("# starts with hash");
+  expect(scan.comments.get("TOKEN")).toBe("# rotated");
+  // after a closing quote, a non-# tail is not a comment
+  expect(scan.comments.has("quiet")).toBe(false);
+  // and the comment text never lands in a value
+  expect(scan.settings.get("user")).toBe("pass");
+});
+
+test("a duplicate key's last occurrence decides the comment, too", () => {
+  const scan = scanNote("A=1 # first\nA=2\nB=1\nB=2 # second\n");
+  expect(scan.settings.get("A")).toBe("2");
+  expect(scan.comments.has("A")).toBe(false);
+  expect(scan.settings.get("B")).toBe("2");
+  expect(scan.comments.get("B")).toBe("# second");
 });
 
 test("exact duplicate keys: last wins, first-seen order", () => {
@@ -147,4 +166,35 @@ test("a realistic mixed note parses to its settings", () => {
   expect(settings.get("DEPLOY_USER")).toBe("deploy");
   expect(settings.get("NOTE")).toBe("this key has spaces around the equals sign");
   expect(settings.size).toBe(4);
+});
+
+test("scanNote splits the keys from the prose lines it skipped", () => {
+  const note = "Notes up top.\nDB_HOST=localhost\nmore prose\nAPI_KEY=abc\n";
+  const scan = scanNote(note);
+  expect([...scan.settings.keys()]).toEqual(["DB_HOST", "API_KEY"]);
+  expect(scan.prose).toBe("Notes up top.\nmore prose\n");
+});
+
+test("scanNote keeps quoted-value continuation lines out of the prose", () => {
+  const scan = scanNote('CERT="-----BEGIN\nMIIE\n-----END-----"\nafter prose');
+  expect(scan.settings.get("CERT")).toBe("-----BEGIN\nMIIE\n-----END-----");
+  expect(scan.prose).toBe("after prose");
+});
+
+test("scanNote hides an unclosed-quote line but still parses the next one", () => {
+  const scan = scanNote('A="oops\nB=still-here');
+  expect(scan.settings.has("A")).toBe(false);
+  expect(scan.settings.get("B")).toBe("still-here");
+  // the half-written secret does not reappear as a paragraph
+  expect(scan.prose).toBe("");
+});
+
+test("scanNote: a prose-only note is all prose, a settings-only note has none", () => {
+  const proseOnly = scanNote("Just a paragraph.\n\nAnother one.");
+  expect(proseOnly.settings.size).toBe(0);
+  expect(proseOnly.prose).toBe("Just a paragraph.\n\nAnother one.");
+  const settingsOnly = scanNote("A=1\nB=2");
+  expect(settingsOnly.prose).toBe("");
+  expect([...settingsOnly.settings.keys()]).toEqual(["A", "B"]);
+  expect(scanNote("")).toEqual({ settings: new Map(), comments: new Map(), prose: "" });
 });

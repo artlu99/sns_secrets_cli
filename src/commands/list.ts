@@ -4,7 +4,7 @@ import { openDatabase, type CacheDb } from "../db.ts";
 import { listNotes, PROSE_TYPES, renderTagGroups, resolveTag, tagGraph, taggedNoteUuids } from "../notes.ts";
 import { dbPath } from "../paths.ts";
 import { loadSession } from "../session-file.ts";
-import { page } from "../pager.ts";
+import { pageIfTall } from "../pager.ts";
 
 export async function openCache(): Promise<CacheDb> {
   const secrets = await loadSession();
@@ -44,10 +44,12 @@ export async function listCommand(options: {
       return;
     }
     const table = renderTagGroups(graph, notes);
-    const rows = table.split("\n").length;
-    const screen = process.stdout.rows ?? 24;
-    if (process.stdout.isTTY && rows > screen - 1) await page(table);
-    else console.log(table);
+    // one terminal-only hint that <id> accepts a title or a uuid, prefix is
+    // enough; omitted when piped so a script reading the table gets a table.
+    // pageIfTall counts the hint lines, so a table that fits with its hint
+    // still prints unpaged.
+    const hint = process.stdout.isTTY ? "\n\na title or a uuid, a prefix is enough:  sns show <id>" : "";
+    await pageIfTall(table + hint);
   } finally {
     db.close();
   }

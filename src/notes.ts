@@ -1,6 +1,6 @@
 import type { CacheDb, ItemRow } from "./db.ts";
 import { UserError } from "./errors.ts";
-import { parseNoteSettings } from "./note-env.ts";
+import { scanNote, type NoteScan } from "./note-env.ts";
 
 /** Key-bearing items are stored for decrypt and never listed. */
 export const HIDDEN_TYPES = new Set(["SN|ItemsKey", "SN|KeySystemItemsKey", "SN|KeySystemRootKey"]);
@@ -28,18 +28,35 @@ export type ListedNote = {
 /** Content types whose prose `text` carries the env-style settings the list counts. */
 export const PROSE_TYPES = new Set(["Note"]);
 
+/** A Note row's prose `text`, or null for other types and unparseable content. */
+function proseText(row: { content_type: string; content: string }): string | null {
+  if (!PROSE_TYPES.has(row.content_type)) return null;
+  try {
+    const parsed = JSON.parse(row.content) as { text?: unknown };
+    return typeof parsed.text === "string" ? parsed.text : null;
+  } catch {
+    return null;
+  }
+}
+
 /**
  * Env-style settings parsed from a row's prose body. Notes parse their
  * `text`; anything else (and any unparseable content) has none.
  */
 export function noteSettings(row: { content_type: string; content: string }): Map<string, string> {
-  if (!PROSE_TYPES.has(row.content_type)) return new Map();
-  try {
-    const parsed = JSON.parse(row.content) as { text?: unknown };
-    return typeof parsed.text === "string" ? parseNoteSettings(parsed.text) : new Map();
-  } catch {
-    return new Map();
-  }
+  const text = proseText(row);
+  // list and search call this for every cached row: skip the prose they never show
+  return text === null ? new Map() : scanNote(text, { prose: false }).settings;
+}
+
+/**
+ * Full scan of a row's prose body — settings, comments, and the skipped
+ * lines — for `sns show`'s inventory. One walk per show; the hot paths use
+ * noteSettings instead.
+ */
+export function noteScan(row: { content_type: string; content: string }): NoteScan {
+  const text = proseText(row);
+  return text === null ? { settings: new Map(), comments: new Map(), prose: "" } : scanNote(text);
 }
 
 /** Standard Notes keeps trashed notes in the account with `trashed: true` on the decrypted content. */
@@ -482,6 +499,101 @@ export function noteBody(row: ItemRow): { title: string; body: string } {
   }
   if (typeof record.text === "string") return { title, body: record.text };
   return { title, body: JSON.stringify(record, null, 2) };
+}
+
+/** Render a user-typed id inside a hint so it pastes back into a shell unchanged. */
+export function shellish(text: string): string {
+  return /^[A-Za-z0-9_.@:/-]+$/.test(text) ? text : `'${text.replaceAll("'", `'\\''`)}'`;
+}
+
+/** Title with its ─ separator — the top of every show layout. */
+export function noteHeader(title: string): string {
+  return `${title}\n${"─".repeat(Math.min(title.length, 40))}`;
+}
+
+/** The pasteable hint that names the two-argument copy form with a real key. */
+function copyHint(query: string, firstKey: string): string {
+  return `copy a value:  sns copy ${shellish(query)} ${firstKey}`;
+}
+
+/**
+ * Mask `key=value` fragments in free text the inventory renders verbatim. The
+ * parser rejects these lines (a commented-out `# OLD_KEY=…`, a mention
+ * mid-sentence), so a value written that way would otherwise reach stdout
+ * without `--raw` — the one thing this view promises never happens. Only
+ * display: parsing itself is untouched.
+ */
+function redactAssignments(text: string): string {
+  return text.replace(/(^|[ \t])([A-Za-z0-9_.-]+)[ \t]*=[ \t]*\S+/gm, "$1$2=[redacted]");
+}
+
+/**
+ * The `sns show` inventory for a note with settings: its title, the prose the
+ * parser skipped, then the setting keys — each drawn as its note line with
+ * the value withheld (`KEY=[redacted]`, or `KEY=  (empty)` when the value is
+ * empty) plus the trailing `#` comment when the note has one. Descriptive
+ * text reads first, and the actionable keys sit last, directly above — on a
+ * terminal only — the hint naming the copy form with a real key. Pure so
+ * tests can pin the exact layout.
+ */
+export function renderNoteInventory(input: {
+  title: string;
+  settings: Map<string, string>;
+  comments: Map<string, string>;
+  prose: string;
+  query: string;
+  terminal: boolean;
+}): string {
+  const lines = [noteHeader(input.title)];
+  const prose = redactAssignments(input.prose).replace(/\n+$/, "");
+  if (prose.trim() !== "") lines.push(prose, "");
+  for (const [key, value] of input.settings) {
+    const label = value === "" ? `${key}=  (empty)` : `${key}=[redacted]`;
+    const comment = input.comments.get(key);
+    lines.push(comment === undefined ? label : `${label}  ${redactAssignments(comment)}`);
+  }
+  if (input.terminal && input.settings.size > 0) {
+    const firstKey = [...input.settings.keys()][0]!;
+    lines.push("", copyHint(input.query, firstKey));
+  }
+  return lines.join("\n");
+}
+
+/** What `sns copy` should do for a resolved row. */
+export type CopyPlan =
+  | { kind: "value"; key: string; value: string }
+  | { kind: "body"; body: string }
+  | { kind: "keys"; keys: string[] };
+
+/**
+ * `sns copy <id> [key]`: an exact, case-sensitive key copies that parsed
+ * value; no key on a settings note copies nothing (the caller lists the
+ * keys); a note without settings still copies its body. A key that does not
+ * exist — including a case mismatch — copies nothing and names the keys.
+ */
+export function planCopy(row: ItemRow, key: string | undefined): CopyPlan {
+  const settings = noteSettings(row);
+  if (settings.size === 0) {
+    if (key !== undefined) {
+      const title = row.title ?? "(untitled)";
+      throw new UserError(`${JSON.stringify(title)} has no KEY=VALUE settings\nits whole body copies with: sns copy <id>`);
+    }
+    return { kind: "body", body: noteBody(row).body };
+  }
+  if (key === undefined) return { kind: "keys", keys: [...settings.keys()] };
+  const value = settings.get(key);
+  if (value === undefined) {
+    const title = row.title ?? "(untitled)";
+    throw new UserError(
+      `no setting ${JSON.stringify(key)} in ${JSON.stringify(title)} (match is exact, case-sensitive)\nits keys: ${[...settings.keys()].join(", ")}`,
+    );
+  }
+  return { kind: "value", key, value };
+}
+
+/** The `sns copy <id>` output on a settings note: the form, then the key names. */
+export function renderCopyKeys(query: string, keys: string[]): string {
+  return [copyHint(query, keys[0]!), ...keys.map((key) => `  ${key}`)].join("\n");
 }
 
 export function formatWhen(ms: number): string {

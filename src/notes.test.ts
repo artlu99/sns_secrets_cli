@@ -3,8 +3,20 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomBytes } from "node:crypto";
-import { openDatabase, upsertItems } from "./db.ts";
-import { listNotes, listTags, renderTagGroups, resolveTag, searchNotes, tagGraph, taggedNoteUuids } from "./notes.ts";
+import { openDatabase, upsertItems, type ItemRow } from "./db.ts";
+import {
+  listNotes,
+  listTags,
+  planCopy,
+  renderCopyKeys,
+  renderNoteInventory,
+  renderTagGroups,
+  resolveNote,
+  resolveTag,
+  searchNotes,
+  tagGraph,
+  taggedNoteUuids,
+} from "./notes.ts";
 import { renderTagTree } from "./commands/tags.ts";
 import { UserError } from "./errors.ts";
 
@@ -747,6 +759,140 @@ test("tag titles are whitespace-normalized for rendering and matching", () => {
     expect(table).not.toContain("a\nb");
     // resolution matches the normalized title too
     expect(resolveTag(tagGraph(db), "a b").uuid).toBe(messy);
+  } finally {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("renderNoteInventory lists keys, marks empties, and hints the copy form", () => {
+  const settings = new Map([
+    ["DB_HOST", "x"],
+    ["TOKEN", ""],
+    ["API_KEY", "y"],
+  ]);
+  const comments = new Map([
+    ["DB_HOST", "# primary host"],
+    ["TOKEN", "# rotate quarterly"],
+  ]);
+  const text = renderNoteInventory({
+    title: "staging api",
+    settings,
+    comments,
+    prose: "Notes on the staging API.\nAsk Alice before rotating.\n",
+    query: "staging",
+    terminal: true,
+  });
+  const lines = text.split("\n");
+  expect(lines[0]).toBe("staging api");
+  expect(lines[1]).toBe("───────────");
+  // prose reads first, right under the title
+  expect(lines.slice(2, 5)).toEqual(["Notes on the staging API.", "Ask Alice before rotating.", ""]);
+  // keys sit below the prose in first-seen order, drawn as their note lines
+  // with values withheld, empties marked, comments beside their key
+  expect(lines.slice(5, 8)).toEqual(["DB_HOST=[redacted]  # primary host", "TOKEN=  (empty)  # rotate quarterly", "API_KEY=[redacted]"]);
+  // the hint names one real key so the next command is pasteable
+  expect(text.endsWith("copy a value:  sns copy staging DB_HOST")).toBe(true);
+  // a query with a space is quoted so the hint pastes back correctly
+  const quoted = renderNoteInventory({
+    title: "t",
+    settings,
+    comments,
+    prose: "",
+    query: "prod db",
+    terminal: true,
+  });
+  expect(quoted).toContain("sns copy 'prod db' DB_HOST");
+  // blank-line-only prose adds no block, and a pipe gets no hint
+  const bare = renderNoteInventory({
+    title: "t",
+    settings,
+    comments: new Map(),
+    prose: "\n\n",
+    query: "t",
+    terminal: false,
+  });
+  expect(bare.split("\n")).toEqual(["t", "─", "DB_HOST=[redacted]", "TOKEN=  (empty)", "API_KEY=[redacted]"]);
+});
+
+test("renderNoteInventory masks assignment-shaped fragments the parser rejected", () => {
+  // a commented-out line and a mid-sentence mention carry values the parser
+  // never parsed — the inventory still must not print them
+  const text = renderNoteInventory({
+    title: "t",
+    settings: new Map([["TOKEN", "new"]]),
+    comments: new Map([["TOKEN", "# OLD_TOKEN=hunter2 until Friday"]]),
+    prose: "# DB_PASS=hunter2 (rotated)\nset KEY = abc midway through the note\nplain prose stays",
+    query: "t",
+    terminal: false,
+  });
+  expect(text).toContain("TOKEN=[redacted]  # OLD_TOKEN=[redacted] until Friday");
+  expect(text).toContain("# DB_PASS=[redacted] (rotated)");
+  expect(text).toContain("set KEY=[redacted] midway through the note");
+  expect(text).toContain("plain prose stays");
+  expect(text).not.toContain("hunter2");
+  expect(text).not.toContain(" abc");
+  // trailing base64 padding (`=` with nothing after it) and prose without an
+  // assignment shape are left alone
+  const harmless = renderNoteInventory({
+    title: "t",
+    settings: new Map([["A", "1"]]),
+    comments: new Map(),
+    prose: "ends with base64 cGFzc3dvcmQ=\nno equals here",
+    query: "t",
+    terminal: false,
+  });
+  expect(harmless).toContain("ends with base64 cGFzc3dvcmQ=");
+  expect(harmless).toContain("no equals here");
+});
+
+test("renderCopyKeys shows the form first, then the key names", () => {
+  expect(renderCopyKeys("staging", ["API_KEY", "API_URL", "TOKEN"])).toBe(
+    ["copy a value:  sns copy staging API_KEY", "  API_KEY", "  API_URL", "  TOKEN"].join("\n"),
+  );
+});
+
+test("planCopy picks the value, the key list, or the body", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sns-copyplan-"));
+  const db = openDatabase(join(dir, "cache.db"), randomBytes(32).toString("hex"));
+  try {
+    upsertItems(db, [
+      {
+        uuid: "cccccc00-0000-0000-0000-000000000001",
+        content_type: "Note",
+        updated_at: 2_000,
+        deleted: 0,
+        title: "Creds",
+        content: JSON.stringify({
+          title: "Creds",
+          text: "staging secrets\nexport API_KEY=abc\nURL=https://x.test\nTOKEN=",
+        }),
+      },
+      {
+        uuid: "cccccc00-0000-0000-0000-000000000002",
+        content_type: "Note",
+        updated_at: 1_000,
+        deleted: 0,
+        title: "Journal",
+        content: JSON.stringify({ title: "Journal", text: "thoughts" }),
+      },
+    ] satisfies ItemRow[]);
+    const creds = resolveNote(db, "Creds");
+    // an exact key copies its parsed value
+    expect(planCopy(creds, "API_KEY")).toEqual({ kind: "value", key: "API_KEY", value: "abc" });
+    // an empty value is still a value
+    expect(planCopy(creds, "TOKEN")).toEqual({ kind: "value", key: "TOKEN", value: "" });
+    // no key on a settings note copies nothing and lists the keys
+    expect(planCopy(creds, undefined)).toEqual({ kind: "keys", keys: ["API_KEY", "URL", "TOKEN"] });
+    // matching is exact and case-sensitive: neither API nor api_key selects API_KEY
+    expect(() => planCopy(creds, "API")).toThrow(/no setting "API" in "Creds"/);
+    expect(() => planCopy(creds, "api_key")).toThrow(/no setting "api_key" in "Creds"/);
+    expect(() => planCopy(creds, "API")).toThrow(/its keys: API_KEY, URL, TOKEN/);
+    // a note without settings still copies its body
+    const journal = resolveNote(db, "Journal");
+    expect(planCopy(journal, undefined)).toEqual({ kind: "body", body: "thoughts" });
+    // a key on a note without settings is an error, not a silent body copy
+    expect(() => planCopy(journal, "KEY")).toThrow(/has no KEY=VALUE settings/);
   } finally {
     db.close();
     rmSync(dir, { recursive: true, force: true });
