@@ -83,7 +83,9 @@ function parseEnvFile(text: string): Record<string, string> {
 export function readPlainConfig(): PlainConfig {
   ensureConfigDir();
   const parsed = parseEnvFile(readFileSync(envPath(), "utf8"));
-  const email = parsed.SN_EMAIL ?? process.env.SN_EMAIL ?? "";
+  // `||`, not `??`: the template .env writes an empty SN_EMAIL=, and a value
+  // set in the environment must win over that placeholder.
+  const email = parsed.SN_EMAIL || process.env.SN_EMAIL || "";
   const apiUrl = parsed.SN_API_URL || process.env.SN_API_URL || DEFAULT_API_URL;
   return { email, apiUrl: apiUrl.replace(/\/+$/, "") };
 }

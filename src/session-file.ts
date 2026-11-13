@@ -16,6 +16,8 @@ const SET_OPTIONS = {
 } as const;
 
 export type SessionSecrets = {
+  /** Non-secret label of the account this session belongs to; guards cache reuse across accounts. */
+  accountEmail: string;
   refreshToken: string;
   accessToken: string;
   accessExpirationMs: number;
@@ -69,6 +71,7 @@ export async function protectPrivateKey(): Promise<boolean> {
 
 function pairs(secrets: SessionSecrets): Array<[SessionValueKey, string]> {
   return [
+    ["SN_ACCOUNT_EMAIL", secrets.accountEmail],
     ["SN_REFRESH_TOKEN", secrets.refreshToken],
     ["SN_ACCESS_TOKEN", secrets.accessToken],
     ["SN_ACCESS_EXPIRATION", String(secrets.accessExpirationMs)],
@@ -79,17 +82,36 @@ function pairs(secrets: SessionSecrets): Array<[SessionValueKey, string]> {
   ];
 }
 
+/** True once .env.session carries its dotenvx public key; then set() never needs the private file. */
+function sessionHasPublicKey(): boolean {
+  if (!existsSync(sessionPath())) return false;
+  try {
+    return /DOTENV_PUBLIC_KEY_SESSION=/.test(readFileSync(sessionPath(), "utf8"));
+  } catch {
+    return false;
+  }
+}
+
 export async function saveSession(secrets: SessionSecrets): Promise<{ keychain: boolean }> {
   if (!/^[0-9a-fA-F]{64}$/.test(secrets.dbKey)) {
     throw new UserError("refusing to store a database key that is not 64 hex characters");
   }
   ensureConfigDir();
-  const existing = await readPrivateKey();
-  if (existing && !existsSync(keysPath())) writePrivateKeyFile(existing);
+  const keychainKey = await keychainGet();
+  const inject = keychainKey !== null && !existsSync(keysPath()) && sessionHasPublicKey();
+  const previousKey = process.env.DOTENV_PRIVATE_KEY_SESSION;
+  if (inject) {
+    // Keychain custody: hand dotenvx the key through the environment. Writing
+    // .env.keys to disk on every save would undo what the keychain is for.
+  } else {
+    const existing = keychainKey ?? readPrivateKeyFile();
+    if (existing && !existsSync(keysPath())) writePrivateKeyFile(existing);
+  }
   // dotenvx prompts for private-key custody on a TTY unless CI is set.
-  // File custody is the choice we want; the keychain move happens after.
+  // File custody bootstraps the keypair; the keychain move happens after.
   const previousCi = process.env.CI;
   process.env.CI = "true";
+  if (inject) process.env.DOTENV_PRIVATE_KEY_SESSION = keychainKey;
   try {
     for (const [key, value] of pairs(secrets)) {
       const result = await set(key, value, sessionOptions());
@@ -99,6 +121,10 @@ export async function saveSession(secrets: SessionSecrets): Promise<{ keychain: 
   } finally {
     if (previousCi === undefined) delete process.env.CI;
     else process.env.CI = previousCi;
+    if (inject) {
+      if (previousKey === undefined) delete process.env.DOTENV_PRIVATE_KEY_SESSION;
+      else process.env.DOTENV_PRIVATE_KEY_SESSION = previousKey;
+    }
   }
   chmodSync(sessionPath(), 0o600);
   const keychain = await protectPrivateKey();
@@ -144,6 +170,7 @@ export async function loadSession(): Promise<SessionSecrets | null> {
     throw new UserError("session file is missing the refresh token or database key — run sns login");
   }
   return {
+    accountEmail: parsed.SN_ACCOUNT_EMAIL ?? "",
     refreshToken,
     accessToken: parsed.SN_ACCESS_TOKEN ?? "",
     accessExpirationMs: Number(parsed.SN_ACCESS_EXPIRATION ?? "0") || 0,

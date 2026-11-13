@@ -1,7 +1,7 @@
 import { createHash, randomBytes } from "node:crypto";
 import { UserError } from "./errors.ts";
 import { deriveRootKey, type KdfParams } from "./sn-crypto/kdf.ts";
-import { API_VERSION, CLIENT_HEADERS, cookiePair, sendJson, type FetchLike, type HttpOptions } from "./http.ts";
+import { API_VERSION, ApiError, CLIENT_HEADERS, cookiePair, sendJson, type FetchLike, type HttpOptions } from "./http.ts";
 import type { SessionSecrets } from "./session-file.ts";
 import type { EncryptedItem } from "./sn-crypto/004.ts";
 
@@ -84,6 +84,7 @@ export function parseSessionBody(body: unknown, setCookies: readonly string[], d
     throw new UserError("login response did not include session tokens");
   }
   return {
+    accountEmail: "",
     accessToken,
     refreshToken,
     accessExpirationMs: expirationMs(session.access_expiration ?? session.access_token_expiration),
@@ -123,73 +124,68 @@ export function createApi(apiUrl: string, fetchImpl?: FetchLike): ApiClient {
     }, { ...http, ...options });
   }
 
+  type PostResponse = Awaited<ReturnType<typeof post>>;
+
+  /**
+   * One POST that handles an MFA challenge whether the server answers with it
+   * in a 200 body or (the real shape) an HTTP error body. Prompts at most
+   * once; a second challenge is a rejection, not another prompt.
+   */
+  async function postWithMfa(
+    path: string,
+    baseBody: Record<string, unknown>,
+    headers: Record<string, string>,
+    mfaCode: () => Promise<string>,
+    seededExtra: Record<string, string> = {},
+  ): Promise<{ response: PostResponse; extra: Record<string, string> }> {
+    const extra: Record<string, string> = { ...seededExtra };
+    for (let attempt = 0; attempt < 2; attempt++) {
+      let response: PostResponse;
+      try {
+        response = await post(path, { ...baseBody, ...extra }, headers);
+      } catch (error) {
+        if (!(error instanceof ApiError)) throw error;
+        const challenge = mfaChallenge(error.body);
+        if (!challenge) throw error;
+        if (attempt > 0) throw new UserError("two-factor authentication was rejected");
+        extra[challenge.mfaKey] = await mfaCode();
+        continue;
+      }
+      const challenge = mfaChallenge(response.body);
+      if (!challenge) return { response, extra };
+      if (attempt > 0) throw new UserError("two-factor authentication was rejected");
+      extra[challenge.mfaKey] = await mfaCode();
+    }
+    throw new UserError("could not complete two-factor authentication");
+  }
+
   return {
     async keyParams(email, mfaCode) {
       const pkce = createPkce();
-      let extra: Record<string, string> = {};
-      for (let attempt = 0; attempt < 2; attempt++) {
-        const response = await post("/v2/login-params", {
-          api: API_VERSION,
-          email,
-          code_challenge: pkce.challenge,
-          ...extra,
-        }, {});
-        const challenge = mfaChallenge(response.body);
-        if (challenge && attempt === 0) {
-          extra = { [challenge.mfaKey]: await mfaCode() };
-          continue;
-        }
-        if (challenge) throw new UserError("two-factor authentication was rejected");
-        return parseKeyParams(response.body);
-      }
-      throw new UserError("could not read login parameters");
+      const { response } = await postWithMfa("/v2/login-params", {
+        api: API_VERSION,
+        email,
+        code_challenge: pkce.challenge,
+      }, {}, mfaCode);
+      return parseKeyParams(response.body);
     },
 
     async login(email, password, mfaCode, dbKey) {
       const pkce = createPkce();
-      let extra: Record<string, string> = {};
-      let paramsBody: unknown = null;
-      for (let attempt = 0; attempt < 2; attempt++) {
-        const response = await post("/v2/login-params", {
-          api: API_VERSION,
-          email,
-          code_challenge: pkce.challenge,
-          ...extra,
-        }, {});
-        const challenge = mfaChallenge(response.body);
-        if (challenge && attempt === 0) {
-          extra = { [challenge.mfaKey]: await mfaCode() };
-          continue;
-        }
-        if (challenge) throw new UserError("two-factor authentication was rejected");
-        paramsBody = response.body;
-        break;
-      }
-      const params = parseKeyParams(paramsBody);
-      const root = await deriveRootKey(password, params);
-      let loginBody: unknown = null;
-      let loginCookies: string[] = [];
-      extra = { ...extra };
-      for (let attempt = 0; attempt < 2; attempt++) {
-        const response = await post("/v2/login", {
-          api: API_VERSION,
-          email,
-          password: root.serverPassword,
-          code_verifier: pkce.verifier,
-          ephemeral: false,
-          ...extra,
-        }, {});
-        const challenge = mfaChallenge(response.body);
-        if (challenge && attempt === 0) {
-          extra = { ...extra, [challenge.mfaKey]: await mfaCode() };
-          continue;
-        }
-        if (challenge) throw new UserError("two-factor authentication was rejected");
-        loginBody = response.body;
-        loginCookies = response.setCookies;
-        break;
-      }
-      return { secrets: parseSessionBody(loginBody, loginCookies, dbKey), masterKey: root.masterKey };
+      const params = await postWithMfa("/v2/login-params", {
+        api: API_VERSION,
+        email,
+        code_challenge: pkce.challenge,
+      }, {}, mfaCode);
+      const root = await deriveRootKey(password, parseKeyParams(params.response.body));
+      const login = await postWithMfa("/v2/login", {
+        api: API_VERSION,
+        email,
+        password: root.serverPassword,
+        code_verifier: pkce.verifier,
+        ephemeral: false,
+      }, {}, mfaCode, params.extra);
+      return { secrets: parseSessionBody(login.response.body, login.response.setCookies, dbKey), masterKey: root.masterKey };
     },
 
     async refresh(secrets) {
@@ -197,6 +193,7 @@ export function createApi(apiUrl: string, fetchImpl?: FetchLike): ApiClient {
       if (secrets.refreshCookie) headers.Cookie = secrets.refreshCookie;
       const response = await post("/v1/sessions/refresh", { api: API_VERSION }, headers);
       const next = parseSessionBody(response.body, response.setCookies, secrets.dbKey);
+      if (!next.accountEmail && secrets.accountEmail) next.accountEmail = secrets.accountEmail;
       if (!next.accessCookie && secrets.accessCookie) next.accessCookie = secrets.accessCookie;
       if (!next.refreshCookie && secrets.refreshCookie) next.refreshCookie = secrets.refreshCookie;
       return next;
@@ -209,7 +206,7 @@ export function createApi(apiUrl: string, fetchImpl?: FetchLike): ApiClient {
       try {
         await post("/v1/logout", { api: API_VERSION }, headers);
       } catch (error) {
-        if (!(error instanceof UserError) || !/HTTP 404|HTTP 405/.test(error.message)) throw error;
+        if (!(error instanceof ApiError) || (error.status !== 404 && error.status !== 405)) throw error;
         await sendJson(`${base}/v1/sessions`, { method: "DELETE", headers: { ...CLIENT_HEADERS, ...headers } }, http);
       }
     },
@@ -266,5 +263,5 @@ export async function withAccess<T>(
 }
 
 function isAuthFailure(error: unknown): boolean {
-  return error instanceof UserError && /HTTP 401|HTTP 498/.test(error.message);
+  return error instanceof ApiError && (error.status === 401 || error.status === 498);
 }

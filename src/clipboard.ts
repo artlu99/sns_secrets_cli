@@ -63,6 +63,9 @@ async function copyViaTool(text: string): Promise<boolean> {
       const child = spawn(path, args, { env: scrubbedEnv(), stdio: ["pipe", "ignore", "ignore"] });
       child.on("error", () => resolve(false));
       child.on("close", (code) => resolve(code === 0));
+      // A helper that exits instantly (no DISPLAY, failed clip.exe) closes the
+      // pipe before the write drains; that is a failed attempt, not a crash.
+      child.stdin.on("error", () => resolve(false));
       child.stdin.end(text);
     });
     if (ok) return true;

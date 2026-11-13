@@ -4,13 +4,14 @@ import { mkdtempSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { doctorChecks } from "./commands/doctor.ts";
-import { scrubbedEnv } from "./env.ts";
+import { clearScrubbedEnvNames, scrubbedEnv } from "./env.ts";
 import { ensureConfigDir, withConfigDir } from "./paths.ts";
 
 test("doctor passes with skips on a fresh config", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sns-doctor-"));
   try {
     const checks = await withConfigDir(dir, async () => {
+      clearScrubbedEnvNames(); // this test owns the launch-env baseline
       ensureConfigDir();
       return doctorChecks();
     });

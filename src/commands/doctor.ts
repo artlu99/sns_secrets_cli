@@ -1,6 +1,6 @@
 import { existsSync, readFileSync } from "node:fs";
 import pc from "picocolors";
-import { scrubbedEnv, assertSessionKeyNames } from "../env.ts";
+import { scrubbedEnv, scrubbedEnvNames, assertSessionKeyNames } from "../env.ts";
 import { keychainGet, secretServiceAvailable } from "../keychain.ts";
 import { configDir, dbPath, ensureConfigDir, envPath, sessionPath, unexpectedConfigFiles } from "../paths.ts";
 import { loadSession, sessionKeyNames } from "../session-file.ts";
@@ -73,7 +73,11 @@ export async function doctorChecks(): Promise<Check[]> {
     try {
       const secrets = await loadSession();
       if (!secrets) {
-        checks.push({ name: "cache", status: "FAIL", detail: "cache.db exists but there is no session key" });
+        checks.push({
+          name: "cache",
+          status: "FAIL",
+          detail: "cache.db exists but there is no session key — the next sns login replaces it, or run sns logout --delete-cache",
+        });
       } else {
         const db = openDatabase(dbPath(), secrets.dbKey);
         const tables = sqliteMasterCount(db);
@@ -86,23 +90,40 @@ export async function doctorChecks(): Promise<Check[]> {
     }
   }
 
-  const probe = scrubbedEnv({ ...process.env, SN_DB_KEY: "scrub-sentinel", DOTENV_PRIVATE_KEY_SESSION: "scrub-sentinel" });
-  const child = Bun.spawn(
-    [process.execPath, "-e", "process.stdout.write((process.env.SN_DB_KEY ?? '') + (process.env.DOTENV_PRIVATE_KEY_SESSION ?? ''))"],
-    { env: probe, stdout: "pipe", stderr: "pipe" },
-  );
-  const leaked = await new Response(child.stdout).text();
-  checks.push(
-    leaked === ""
-      ? { name: "scrub", status: "ok", detail: "child environment has no secret variables" }
-      : { name: "scrub", status: "FAIL", detail: "a child process could see secret variables" },
-  );
+  // Probe a real child process, not this one: execPath may be the compiled
+  // sns binary itself (which rejects `-e`), so prefer a bun from PATH.
+  const probeBin = process.execPath.endsWith("bun") ? process.execPath : Bun.which("bun");
+  if (!probeBin) {
+    checks.push({ name: "scrub", status: "SKIP", detail: "no bun binary found to run the child-environment probe" });
+  } else {
+    const probe = scrubbedEnv({ ...process.env, SN_DB_KEY: "scrub-sentinel", DOTENV_PRIVATE_KEY_SESSION: "scrub-sentinel" });
+    const child = Bun.spawn(
+      [probeBin, "-e", "process.stdout.write((process.env.SN_DB_KEY ?? '') + (process.env.DOTENV_PRIVATE_KEY_SESSION ?? ''))"],
+      { env: probe, stdout: "pipe", stderr: "pipe" },
+    );
+    const [leaked, code] = await Promise.all([new Response(child.stdout).text(), child.exited]);
+    checks.push(
+      code === 0 && leaked === ""
+        ? { name: "scrub", status: "ok", detail: "child environment has no secret variables" }
+        : { name: "scrub", status: "FAIL", detail: `child probe exited ${code}${leaked === "" ? "" : " and saw secret variables"}` },
+    );
+  }
 
   const passwordVar = ["SN", "PASSWORD"].join("_");
+  const launched = scrubbedEnvNames();
+  if (launched.includes(passwordVar)) {
+    checks.push({
+      name: "password",
+      status: "FAIL",
+      detail: `${passwordVar} was set at launch and was scrubbed — sns never reads a password from the environment`,
+    });
+  } else {
+    checks.push({ name: "password", status: "ok", detail: `${passwordVar} was not in the launch environment` });
+  }
   checks.push(
-    passwordVar in process.env
-      ? { name: "password", status: "FAIL", detail: `${passwordVar} is set in this process` }
-      : { name: "password", status: "ok", detail: `${passwordVar} is not in the environment` },
+    launched.length === 0
+      ? { name: "env", status: "ok", detail: "no secret-named variables at launch" }
+      : { name: "env", status: "FAIL", detail: `secret-named variables scrubbed at launch: ${launched.join(", ")}` },
   );
 
   if (existsSync(dbPath())) {

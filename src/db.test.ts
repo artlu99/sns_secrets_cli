@@ -3,7 +3,7 @@ import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { randomBytes } from "node:crypto";
-import { countItems, openDatabase, openDatabaseOrReplace, readSyncState, upsertItems, writeSyncState } from "./db.ts";
+import { countItems, isWrongKeyDatabase, openDatabase, openDatabaseOrReplace, readSyncState, upsertItems, writeSyncState } from "./db.ts";
 
 test("cache is encrypted at rest and rejects the wrong key", () => {
   const dir = mkdtempSync(join(tmpdir(), "sns-db-"));
@@ -42,4 +42,15 @@ test("cache is encrypted at rest and rejects the wrong key", () => {
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("only not-a-database failures count as wrong key", () => {
+  const notadb = Object.assign(new Error("file is not a database"), { code: "SQLITE_NOTADB" });
+  const busy = Object.assign(new Error("SQLITE_BUSY: database is locked"), { code: "SQLITE_BUSY" });
+  const ioerr = new Error("SQLITE_IOERR: disk I/O error");
+  expect(isWrongKeyDatabase(notadb)).toBe(true);
+  expect(isWrongKeyDatabase(new Error("file is not a database"))).toBe(true);
+  expect(isWrongKeyDatabase(busy)).toBe(false);
+  expect(isWrongKeyDatabase(ioerr)).toBe(false);
+  expect(isWrongKeyDatabase("not an error object")).toBe(false);
 });

@@ -1,5 +1,5 @@
 import { expect, test } from "bun:test";
-import { sendJson } from "./http.ts";
+import { ApiError, sendJson } from "./http.ts";
 
 function response(status: number, body = "{}"): Response {
   return new Response(body, { status, headers: { "content-type": "application/json" } });
@@ -55,4 +55,16 @@ test("a recovered 401 returns the second response", async () => {
   });
   expect(result.status).toBe(200);
   expect(calls).toBe(2);
+});
+
+test("HTTP failures keep their status and parsed body", async () => {
+  const error: unknown = await sendJson("https://example.test/login-params", { method: "POST" }, {
+    fetch: async () =>
+      response(401, JSON.stringify({ data: { error: { tag: "mfa-required", payload: { mfa_key: "mfa_abc" } } } })),
+  }).catch((caught) => caught);
+  expect(error).toBeInstanceOf(ApiError);
+  const apiError = error as ApiError;
+  expect(apiError.status).toBe(401);
+  expect((apiError.body as { data: { error: { tag: string } } }).data.error.tag).toBe("mfa-required");
+  expect(apiError.message).toContain("HTTP 401");
 });

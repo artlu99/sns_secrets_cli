@@ -35,6 +35,7 @@ test("session file round-trips and keeps mode 0600", async () => {
     await withConfigDir(dir, async () => {
       ensureConfigDir();
       await saveSession({
+        accountEmail: "me@example.com",
         refreshToken: "refresh-1",
         accessToken: "access-1",
         accessExpirationMs: 1_700_000_000_000,
@@ -45,6 +46,7 @@ test("session file round-trips and keeps mode 0600", async () => {
       });
       const loaded = await loadSession();
       expect(loaded?.refreshToken).toBe("refresh-1");
+      expect(loaded?.accountEmail).toBe("me@example.com");
       expect(loaded?.dbKey).toBe("ab".repeat(32));
       const names = sessionKeyNames();
       expect(names).toContain("SN_DB_KEY");

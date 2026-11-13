@@ -38,6 +38,27 @@ function errorSummary(status: number, body: string): string {
 }
 
 /**
+ * An HTTP failure that keeps its status and parsed body, so callers can steer
+ * on facts (MFA tags, 404/405 fallbacks, auth retries) instead of prose.
+ * The message still summarizes the failure; it never contains secrets.
+ */
+export class ApiError extends UserError {
+  readonly status: number;
+  readonly body: unknown;
+
+  constructor(status: number, text: string) {
+    super(errorSummary(status, text));
+    this.name = "ApiError";
+    this.status = status;
+    try {
+      this.body = JSON.parse(text);
+    } catch {
+      this.body = null;
+    }
+  }
+}
+
+/**
  * One request, with 429 backoff (3 tries) and a single 401/498 refresh.
  * The unauthorized hook runs at most once, so a bad refresh cannot loop.
  */
@@ -66,7 +87,7 @@ export async function sendJson(
     }
     const text = await response.text();
     if (response.status >= 400) {
-      throw new UserError(errorSummary(response.status, text));
+      throw new ApiError(response.status, text);
     }
     let body: unknown = null;
     if (text.trim() !== "") {

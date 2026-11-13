@@ -31,6 +31,17 @@ CREATE TABLE IF NOT EXISTS sync_state (
 );
 `;
 
+/**
+ * True only for "this file is not a database we can read" — a wrong key or a
+ * corrupt file (SQLITE_NOTADB). Busy and I/O errors must NOT match: they are
+ * transient, and callers treat wrong-key as permission to delete the cache.
+ */
+export function isWrongKeyDatabase(error: unknown): boolean {
+  if (!(error instanceof Error)) return false;
+  if ((error as { code?: unknown }).code === "SQLITE_NOTADB") return true;
+  return /file is not a database|unsupported file format/i.test(error.message);
+}
+
 export function openDatabase(path: string, dbKey: string): CacheDb {
   if (!/^[0-9a-fA-F]{64}$/.test(dbKey)) {
     throw new UserError("database key must be 64 hex characters");
@@ -43,11 +54,13 @@ export function openDatabase(path: string, dbKey: string): CacheDb {
     db.pragma("busy_timeout = 5000");
     db.prepare("SELECT count(*) AS n FROM sqlite_master").get();
     db.exec(SCHEMA);
-    db.prepare("UPDATE items SET updated_at = updated_at / 1000 WHERE updated_at >= 100000000000000").run();
   } catch (error) {
     db.close();
     if (error instanceof UserError) throw error;
-    throw new UserError("could not open cache.db with the stored database key");
+    if (isWrongKeyDatabase(error)) {
+      throw new UserError("could not open cache.db with the stored database key");
+    }
+    throw error;
   }
   return db;
 }

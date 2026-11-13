@@ -51,7 +51,7 @@ export async function pullNotes(options: {
 }
 
 export function syncSummary(report: SyncReport, replaced: boolean): string {
-  const cache = replaced ? "previous cache.db used a deleted key and was removed\n" : "";
+  const cache = replaced ? "previous cache.db could not be opened with the current key and was removed\n" : "";
   return `${cache}upserted ${report.upserted}, skipped ${report.skipped}, conflicts ${report.conflicts}, pages ${report.pages}\nnext: sns list`;
 }
 

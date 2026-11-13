@@ -16,13 +16,13 @@ Whoever has that private key can read every synced note and can use the refresh 
 
 `list`, `search`, `show`, `copy`, and the no-argument browser open this chain on disk. They do not contact the server, and they do not look at token expiry. An expired server session still leaves the notes readable.
 
-`sns logout` revokes the server session when the network allows it (`POST /v1/logout`, and `DELETE /v1/sessions` if that returns 404 or 405). It then deletes `.env.session`, `.env.keys`, the keychain item, and `cache.db`, including when revoke fails.
+`sns logout` refreshes the access token first if it has expired, then revokes the server session when the network allows it (`POST /v1/logout`, and `DELETE /v1/sessions` if that returns 404 or 405). It then deletes `.env.session`, `.env.keys`, and the keychain item, including when revoke fails. `cache.db` stays unless `--delete-cache` is given — either way it is unreadable, because its database key lived in the deleted session; the next login generates a fresh key and replaces the file.
 
 Plain `.env` holds `SN_EMAIL` and `SN_API_URL` only. The config directory is `~/.config/sn_secrets_cli/`, mode `0700`.
 
 ## With a keychain
 
-Linux uses `secret-tool` with `service=sn_secrets_cli` and `account=dotenvkey`, when the secret service answers. macOS uses the login keychain through `security`, with the same service and account. After the key is stored, `.env.keys` is removed.
+Linux uses `secret-tool` with `service=sn_secrets_cli` and `account=dotenvkey`, when the secret service answers. macOS uses the login keychain through `security`, with the same service and account. After the key is stored, `.env.keys` is removed and never recreated: later saves hand dotenvx the key through the process environment, not a file.
 
 A cold copy of the disk (a stopped VM image, a backup, a machine that is off) contains `cache.db` and `.env.session` as ciphertext. The private key is inside the login keyring, and that file is encrypted with the login password. The password is not on the disk. The config directory by itself does not open the notes.
 

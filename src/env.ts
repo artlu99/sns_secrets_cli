@@ -3,6 +3,7 @@
  * The account password is never one of them.
  */
 export const SESSION_VALUE_KEYS = [
+  "SN_ACCOUNT_EMAIL",
   "SN_REFRESH_TOKEN",
   "SN_ACCESS_TOKEN",
   "SN_ACCESS_EXPIRATION",
@@ -33,11 +34,30 @@ export function scrubbedEnv(base: NodeJS.ProcessEnv = process.env): Record<strin
   return out;
 }
 
+const scrubbedNames: string[] = [];
+
+/**
+ * Secret-named variables the launch environment carried, recorded by
+ * `scrubProcessEnv`. Names only — the values are gone for good. `sns doctor`
+ * reports these so a scrubbed-at-launch secret is visible instead of silent.
+ */
+export function scrubbedEnvNames(): readonly string[] {
+  return scrubbedNames;
+}
+
 /** Drop secret-named variables bun or a parent shell may have loaded. */
 export function scrubProcessEnv(): void {
   for (const key of Object.keys(process.env)) {
-    if (isSecretEnvName(key)) delete process.env[key];
+    if (isSecretEnvName(key)) {
+      delete process.env[key];
+      if (!scrubbedNames.includes(key)) scrubbedNames.push(key);
+    }
   }
+}
+
+/** Tests only: forget recorded names so a suite starts from a clean launch state. */
+export function clearScrubbedEnvNames(): void {
+  scrubbedNames.length = 0;
 }
 
 export function assertSessionKeyNames(names: readonly string[]): string | null {

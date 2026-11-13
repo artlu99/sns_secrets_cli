@@ -47,31 +47,42 @@ export function listNotes(
   db: CacheDb,
   options: { type?: string; limit: number; all?: boolean },
 ): ListedNote[] {
-  const clauses = ["deleted = 0", "COALESCE(json_extract(content, '$.trashed'), 0) != 1"];
+  // No json_extract here: a cached row whose content is not valid JSON would
+  // make SQLite raise mid-query and kill the whole listing. Trashed is
+  // filtered in JS, where every other parser tolerates bad content.
+  const clauses = ["deleted = 0"];
   const params: Array<string | number> = [];
   if (options.type) {
     clauses.push("content_type = ?");
     params.push(options.type);
-  } else {
+  } else if (!options.all) {
     clauses.push("content_type = 'Note'");
   }
-  params.push(options.limit);
   const rows = db
     .prepare(
       `SELECT uuid, content_type, updated_at, title, content FROM items
        WHERE ${clauses.join(" AND ")}
-       ORDER BY updated_at DESC
-       LIMIT ?`,
+       ORDER BY updated_at DESC`,
     )
     .all(...params) as Array<Pick<ItemRow, "uuid" | "content_type" | "updated_at" | "title" | "content">>;
-  return rows.map((row) => ({
-    uuid: row.uuid,
-    content_type: row.content_type,
-    updated_at: row.updated_at,
-    title: row.title ?? "(untitled)",
-    trashed: isTrashed(row.content),
-    protected: isProtected(row.content),
-  }));
+  const listed: ListedNote[] = [];
+  for (const row of rows) {
+    if (isTrashed(row.content)) continue;
+    listed.push({
+      uuid: row.uuid,
+      content_type: row.content_type,
+      updated_at: row.updated_at,
+      title: row.title ?? label(row),
+      trashed: false,
+      protected: isProtected(row.content),
+    });
+    if (listed.length >= options.limit) break;
+  }
+  return listed;
+}
+
+function label(row: { content_type: string }): string {
+  return HIDDEN_TYPES.has(row.content_type) ? row.content_type : "(untitled)";
 }
 
 export type SearchHit = ListedNote & { snippet: string };
@@ -99,7 +110,8 @@ export function searchNotes(
     .all() as ItemRow[];
   const hits: SearchHit[] = [];
   for (const row of rows) {
-    if (row.content_type !== "Note" || isTrashed(row.content)) continue;
+    if (isTrashed(row.content)) continue;
+    if (!options.all && row.content_type !== "Note") continue;
     const title = row.title ?? "";
     const haystack = `${title}\n${row.content}`;
     const matched = pattern ? pattern.test(haystack) : haystack.toLowerCase().includes(needle);
@@ -108,7 +120,7 @@ export function searchNotes(
       uuid: row.uuid,
       content_type: row.content_type,
       updated_at: row.updated_at,
-      title: title || "(untitled)",
+      title: title || label(row),
       trashed: false,
       protected: isProtected(row.content),
       snippet: snippet(haystack, pattern, needle),
@@ -138,7 +150,7 @@ export function resolveNote(db: CacheDb, query: string, options: { all?: boolean
   const rows = db
     .prepare("SELECT uuid, content_type, updated_at, deleted, title, content FROM items WHERE deleted = 0")
     .all() as ItemRow[];
-  const visible = rows.filter((row) => row.content_type === "Note" && !isTrashed(row.content));
+  const visible = rows.filter((row) => (options.all || row.content_type === "Note") && !isTrashed(row.content));
   const exact = visible.find((row) => row.uuid === query);
   if (exact) return exact;
   if (/^[0-9a-fA-F-]{8,}$/.test(query)) {

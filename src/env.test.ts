@@ -1,5 +1,12 @@
 import { expect, test } from "bun:test";
-import { assertSessionKeyNames, isSecretEnvName, scrubbedEnv } from "./env.ts";
+import {
+  assertSessionKeyNames,
+  isSecretEnvName,
+  scrubbedEnv,
+  scrubbedEnvNames,
+  scrubProcessEnv,
+  SESSION_VALUE_KEYS,
+} from "./env.ts";
 
 test("secret names are removed before a child process", () => {
   const env = scrubbedEnv({
@@ -23,4 +30,16 @@ test("session key allowlist rejects anything else", () => {
   expect(assertSessionKeyNames(["SN_REFRESH_TOKEN", "SOMETHING_ELSE"])).toBe("SOMETHING_ELSE");
   expect(isSecretEnvName("SN_EMAIL")).toBe(false);
   expect(isSecretEnvName(["SN", "PASSWORD"].join("_"))).toBe(true);
+  expect(SESSION_VALUE_KEYS.includes("SN_ACCOUNT_EMAIL" as never)).toBe(true);
+});
+
+test("scrubProcessEnv records the names it removed", () => {
+  process.env.SN_SCRUB_PROBE_KEY = "probe";
+  try {
+    scrubProcessEnv();
+    expect(process.env.SN_SCRUB_PROBE_KEY).toBeUndefined();
+    expect(scrubbedEnvNames().includes("SN_SCRUB_PROBE_KEY")).toBe(true);
+  } finally {
+    delete process.env.SN_SCRUB_PROBE_KEY;
+  }
 });

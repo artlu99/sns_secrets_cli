@@ -1,6 +1,7 @@
 import { UserError } from "./errors.ts";
 import type { CacheDb, ItemRow } from "./db.ts";
 import { readSyncState, upsertItems, writeSyncState } from "./db.ts";
+import { HIDDEN_TYPES } from "./notes.ts";
 import {
   decryptItemContent,
   isItemsKey,
@@ -15,8 +16,6 @@ export type SyncReport = {
   conflicts: number;
   pages: number;
 };
-
-const KEY_TYPES = new Set(["SN|ItemsKey", "SN|KeySystemItemsKey", "SN|KeySystemRootKey"]);
 
 /** Notes are what we show. Items keys stay so later syncs can decrypt without the password. */
 export function isStoredType(contentType: string): boolean {
@@ -46,7 +45,7 @@ export function toUnixMs(value: number): number {
 }
 
 function titleFromContent(contentType: string, content: string): string | null {
-  if (KEY_TYPES.has(contentType)) return null;
+  if (HIDDEN_TYPES.has(contentType)) return null;
   try {
     const parsed = JSON.parse(content) as { title?: unknown; name?: unknown };
     if (typeof parsed.title === "string" && parsed.title !== "") return parsed.title;
