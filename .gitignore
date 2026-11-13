@@ -1,0 +1,28 @@
+# dependencies (bun install)
+node_modules
+bun.lock
+
+# output
+out
+dist
+
+# dotenv environment variable files
+.env
+.env.development.local
+.env.test.local
+.env.production.local
+.env.local
+
+# caches
+*.tsbuildinfo
+
+PLAN.md
+PLAN?.md
+
+# sn_secrets_cli: secrets & encrypted cache never get committed
+.env.session
+.env.keys
+*.db
+PLAN?.md
+CLAUDE.md
+AGENTS.md

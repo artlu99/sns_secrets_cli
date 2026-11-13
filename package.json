@@ -1,0 +1,30 @@
+{
+  "name": "sn-secrets-cli",
+  "version": "0.1.0",
+  "module": "src/index.ts",
+  "type": "module",
+  "private": true,
+  "bin": {
+    "sns": "src/index.ts"
+  },
+  "scripts": {
+    "build": "bun build --compile --target=bun --outfile=dist/sns --no-compile-autoload-dotenv src/index.ts",
+    "typecheck": "bun check",
+    "test": "bun test",
+    "start": "bun src/index.ts"
+  },
+  "devDependencies": {
+    "@types/bun": "latest"
+  },
+  "peerDependencies": {
+    "typescript": "^7"
+  },
+  "dependencies": {
+    "@clack/prompts": "^1.9.0",
+    "@dotenvx/dotenvx": "^2.38.2",
+    "better-sqlite3-multiple-ciphers": "^13.0.3",
+    "commander": "^15.1.0",
+    "libsodium-wrappers-sumo": "^0.8.4",
+    "picocolors": "^1.1.1"
+  }
+}
