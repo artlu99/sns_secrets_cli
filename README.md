@@ -86,9 +86,11 @@ Everything lives in `~/.config/sn_secrets_cli/` (override with `SNS_CONFIG_DIR`)
 
 The cache key is random. The account password cannot reopen `cache.db`. One key opens every synced note. When a secret service is available, the dotenvx private key is stored in the OS keychain and `.env.keys` is removed. [SECURITY.md](SECURITY.md) describes what a disk copy can read in that case, and what it can read when the key stays in `.env.keys`.
 
-## TODO
+## Browser extension
 
-- web client — a local browser UI over the same encrypted cache, under the same redaction rules as the CLI.
+A companion Chrome extension lives in [extension/](extension/): the same vault, next to the browser. A popup searches every KEY across every note and copies the value on click; a full-page dashboard draws the tag tree — the same nesting rules `sns list` infers — and a per-key inventory with values masked until you reveal them. Prose is masked under the same redaction rules as `sns show`, so no value renders where you did not ask for one. Copies blank the clipboard after 30 seconds.
+
+All cryptography runs in the extension: Argon2id key derivation (the server's own parameters) and XChaCha20-Poly1305 decryption, with libsodium's WASM. The master key and session tokens live in memory-only session storage — nothing secret touches disk, and locking or exiting the browser clears them. The extension never injects into web pages; its only network traffic is to the Standard Notes API. Read-only for now — editing notes is v2. The full security model and setup are in [extension/README.md](extension/README.md).
 
 ## Development
 

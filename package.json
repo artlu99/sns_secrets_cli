@@ -7,6 +7,9 @@
   "bin": {
     "sns": "src/index.ts"
   },
+  "workspaces": [
+    "extension"
+  ],
   "scripts": {
     "build": "bun build --compile --target=bun --outfile=dist/sns --no-compile-autoload-dotenv src/index.ts",
     "typecheck": "bun check",

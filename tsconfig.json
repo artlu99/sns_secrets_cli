@@ -1,7 +1,9 @@
 {
   "compilerOptions": {
     // Environment setup & latest features
-    "lib": ["ESNext"],
+    // DOM libs: the extension/ workspace's UI code typechecks under this same
+    // config (bun check at the root), so the web globals are part of the graph.
+    "lib": ["ESNext", "DOM", "DOM.Iterable"],
     "target": "ESNext",
     "module": "Preserve",
     "moduleDetection": "force",
@@ -28,5 +30,11 @@
     "noUnusedLocals": false,
     "noUnusedParameters": false,
     "noPropertyAccessFromIndexSignature": false
-  }
+  },
+  // extension/.output holds wxt's generated bundles — never typecheck those.
+  // The .wxt/wxt.d.ts reference brings in wxt's auto-import declarations
+  // (defineBackground etc.); dot-directories are skipped by ** include globs,
+  // so the generated file must be named explicitly.
+  "include": ["**/*", "extension/.wxt/wxt.d.ts"],
+  "exclude": ["extension/.output", "extension/node_modules"]
 }
