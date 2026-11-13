@@ -44,7 +44,12 @@ export function listNotes(
   if (options.type) {
     clauses.push("content_type = ?");
     params.push(options.type);
-  } else if (!options.all) {
+  } else if (options.all) {
+    // --all means "plus key-bearing items" — never tag rows, which would
+    // otherwise land in the (untagged) group as junk
+    const types = ["Note", ...HIDDEN_TYPES].map((type) => `'${type}'`).join(", ");
+    clauses.push(`content_type IN (${types})`);
+  } else {
     clauses.push("content_type = 'Note'");
   }
   const rows = db
@@ -90,6 +95,7 @@ export function searchNotes(
     }
   }
   const needle = query.toLowerCase();
+  const visibleTypes = new Set(["Note", ...(options.all ? HIDDEN_TYPES : [])]);
   const rows = db
     .prepare(
       `SELECT uuid, content_type, updated_at, title, content FROM items
@@ -100,7 +106,7 @@ export function searchNotes(
   const hits: SearchHit[] = [];
   for (const row of rows) {
     if (isTrashed(row.content)) continue;
-    if (!options.all && row.content_type !== "Note") continue;
+    if (!visibleTypes.has(row.content_type)) continue;
     const title = row.title ?? "";
     const haystack = `${title}\n${row.content}`;
     const matched = pattern ? pattern.test(haystack) : haystack.toLowerCase().includes(needle);
@@ -138,7 +144,8 @@ export function resolveNote(db: CacheDb, query: string, options: { all?: boolean
   const rows = db
     .prepare("SELECT uuid, content_type, updated_at, deleted, title, content FROM items WHERE deleted = 0")
     .all() as ItemRow[];
-  const visible = rows.filter((row) => (options.all || row.content_type === "Note") && !isTrashed(row.content));
+  const visibleTypes = new Set(["Note", ...(options.all ? HIDDEN_TYPES : [])]);
+  const visible = rows.filter((row) => visibleTypes.has(row.content_type) && !isTrashed(row.content));
   const exact = visible.find((row) => row.uuid === query);
   if (exact) return exact;
   if (/^[0-9a-fA-F-]{8,}$/.test(query)) {
@@ -193,16 +200,23 @@ type TagLinks = {
   tagToNotes: Map<string, Set<string>>;
 };
 
+/** Tag titles render and resolve everywhere, so whitespace is normalized once here. */
+function normalizeTitle(title: string | null): string {
+  return (title ?? "").replace(/\s+/g, " ").trim() || "(untitled)";
+}
+
 /**
  * Both link sides are unioned — the tag's references and the note's — since the
- * app keeps them in sync but either side can lag mid-update. Parents only count
+ * app keeps them in sync but either side can lag mid-update. References are
+ * filtered to notes the cache can actually show (a hard-deleted note leaves a
+ * deleted=1 tombstone that the tag's references still name). Parents only count
  * when the parent tag itself exists, so a dangling parent renders top-level.
  */
 function tagLinks(db: CacheDb): TagLinks {
   const tagRows = db
     .prepare("SELECT uuid, title, content FROM items WHERE content_type = 'Tag' AND deleted = 0")
     .all() as Array<Pick<ItemRow, "uuid" | "title" | "content">>;
-  const titleOf = new Map<string, string>(tagRows.map((row) => [row.uuid, row.title ?? "(untitled)"]));
+  const titleOf = new Map<string, string>(tagRows.map((row) => [row.uuid, normalizeTitle(row.title)]));
   const parentOf = new Map<string, string | null>(tagRows.map((row) => [row.uuid, null]));
   const tagToNotes = new Map<string, Set<string>>(tagRows.map((row) => [row.uuid, new Set<string>()]));
   for (const row of tagRows) {
@@ -216,21 +230,18 @@ function tagLinks(db: CacheDb): TagLinks {
   const noteRows = db
     .prepare("SELECT uuid, content FROM items WHERE content_type = 'Note' AND deleted = 0")
     .all() as Array<Pick<ItemRow, "uuid" | "content">>;
-  const trashed = new Set<string>();
+  const live = new Set<string>();
   for (const row of noteRows) {
-    if (isTrashed(row.content)) {
-      trashed.add(row.uuid);
-      continue;
-    }
+    if (isTrashed(row.content)) continue;
+    live.add(row.uuid);
     for (const ref of contentReferences(row.content)) {
       if (ref.content_type === "Tag") tagToNotes.get(ref.uuid)?.add(row.uuid);
     }
   }
-  // Counts and placement must match what the list can actually show.
-  if (trashed.size > 0) {
-    for (const set of tagToNotes.values()) {
-      for (const uuid of trashed) set.delete(uuid);
-    }
+  // Tombstones: notes deleted on another device (deleted=1, content "{}") are
+  // still named by the tag's own references — drop them or counts never shrink.
+  for (const set of tagToNotes.values()) {
+    for (const uuid of [...set]) if (!live.has(uuid)) set.delete(uuid);
   }
   return { titleOf, parentOf, tagToNotes };
 }
@@ -249,7 +260,9 @@ function resolveParents(links: TagLinks): Map<string, string | null> {
     (links.titleOf.get(a) ?? "").localeCompare(links.titleOf.get(b) ?? "") || a.localeCompare(b);
   for (const tag of tags) {
     const explicit = links.parentOf.get(tag);
-    if (explicit && parentOf.has(explicit)) {
+    // check the INPUT map: parentOf (output) is half-built at this point, so
+    // testing it here made explicit folders depend on SQLite row order
+    if (explicit && links.parentOf.has(explicit)) {
       parentOf.set(tag, explicit);
       continue;
     }
@@ -316,9 +329,29 @@ export function listTags(db: CacheDb): ListedTag[] {
   return tags;
 }
 
-/** Note uuids under a tag: the union of both reference sides. */
+/**
+ * Note uuids under a tag or folder: the subtree's membership, so
+ * `sns list --tag <folder>` finds notes that sit in its child tags.
+ */
 export function taggedNoteUuids(db: CacheDb, tagUuid: string): Set<string> {
-  return tagLinks(db).tagToNotes.get(tagUuid) ?? new Set();
+  const links = tagLinks(db);
+  const parentOf = resolveParents(links);
+  const subtree = new Set<string>([tagUuid]);
+  let grew = true;
+  while (grew) {
+    grew = false;
+    for (const [tag, parent] of parentOf) {
+      if (parent !== null && subtree.has(parent) && !subtree.has(tag)) {
+        subtree.add(tag);
+        grew = true;
+      }
+    }
+  }
+  const uuids = new Set<string>();
+  for (const tag of subtree) {
+    for (const uuid of links.tagToNotes.get(tag) ?? []) uuids.add(uuid);
+  }
+  return uuids;
 }
 
 export function resolveTag(db: CacheDb, query: string): ListedTag {
@@ -375,11 +408,11 @@ const UNTAGGED = "(untagged)";
 
 /**
  * Hierarchical `sns list`. Tags render as a forest — explicit SN folders win,
- * otherwise containment is inferred (see resolveParents) — and every note is
- * placed exactly once, under its deepest tag. A group's header count is its
- * full cached note count, so a parent can say (6) while listing only the notes
- * its children did not claim. Tags with no notes at all are left out of the
- * list (sns tags still shows them); untagged notes land in (untagged) last.
+ * otherwise containment is inferred (see resolveParents) — and every listed
+ * note is placed exactly once, under its deepest tag. Header counts come from
+ * the notes argument (subtree totals), so --limit and --tag filters never
+ * show a count for rows that are not listed. Tags with nothing under them are
+ * left out (sns tags still shows them); untagged notes land in (untagged) last.
  */
 export function renderTagGroups(db: CacheDb, notes: ListedNote[]): string {
   const links = tagLinks(db);
@@ -416,6 +449,16 @@ export function renderTagGroups(db: CacheDb, notes: ListedNote[]): string {
       placed.set(home, rows);
     }
   }
+
+  // Header counts are subtree totals over the listed notes only.
+  const countOf = new Map<string, number>();
+  const measure = (tag: string): number => {
+    let total = placed.get(tag)?.length ?? 0;
+    for (const child of childrenOf.get(tag) ?? []) total += measure(child);
+    countOf.set(tag, total);
+    return total;
+  };
+  for (const tag of links.titleOf.keys()) measure(tag);
 
   const widths = [
     Math.max(...notes.map((note) => note.title.replace(/\s+/g, " ").length), 5),
@@ -454,7 +497,7 @@ export function renderTagGroups(db: CacheDb, notes: ListedNote[]): string {
       if (childBlock) kids.push(...childBlock);
     }
     if (rows.length === 0 && kids.length === 0) return null;
-    const count = links.tagToNotes.get(tag)?.size ?? 0;
+    const count = countOf.get(tag) ?? 0;
     return [`${"  ".repeat(depth)}${links.titleOf.get(tag) ?? tag} (${count})`, ...rows, ...kids];
   };
 

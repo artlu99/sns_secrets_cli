@@ -67,7 +67,13 @@ export function openDatabase(path: string, dbKey: string): CacheDb {
         name: string;
       }>;
       if (columns.some((existing) => existing.name === column)) continue;
-      db.exec(migration.sql);
+      try {
+        db.exec(migration.sql);
+      } catch (error) {
+        // two processes can pass the probe before either ALTER commits; the
+        // loser's "duplicate column" means the migration already ran
+        if (!(error instanceof Error) || !/duplicate column name/i.test(error.message)) throw error;
+      }
     }
   } catch (error) {
     db.close();

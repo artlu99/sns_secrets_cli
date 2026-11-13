@@ -26,7 +26,9 @@ export async function listCommand(options: {
     const tagUuids = options.tag ? taggedNoteUuids(db, resolveTag(db, options.tag).uuid) : undefined;
     const notes = listNotes(db, { type: options.type, limit, all: options.all, tagUuids });
     if (notes.length === 0) {
-      console.log("no notes in the cache — run sns sync");
+      if (options.tag) console.log(`no notes under tag ${JSON.stringify(options.tag)}`);
+      else if (options.type) console.log(`no notes of type ${options.type}`);
+      else console.log("no notes in the cache — run sns sync");
       return;
     }
     const table = renderTagGroups(db, notes);

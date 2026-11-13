@@ -19,8 +19,8 @@ export type SyncReport = {
 
 const STORED_TYPES = new Set(["Note", "SN|ItemsKey", "Tag"]);
 
-/** Recorded in sync_state; a mismatch forces a full pull so newly stored types backfill. */
-const STORED_TYPES_VERSION = [...STORED_TYPES].sort().join(",");
+/** Recorded in sync_state (with the token it was written for); a mismatch forces a full pull. */
+export const STORED_TYPES_VERSION = [...STORED_TYPES].sort().join(",");
 
 /**
  * Notes are what we show. Tags come along read-only (titles, parents, note
@@ -140,8 +140,12 @@ export async function runSync(options: {
   const state = readSyncState(options.db);
   // The token only applies to the stored-type set that produced it; after a
   // change (e.g. tags newly stored) the incremental feed would never resend
-  // what earlier syncs dropped, so fall back to a full pull.
-  const tokenMatchesTypes = state.storedTypes === STORED_TYPES_VERSION;
+  // what earlier syncs dropped, so fall back to a full pull. The marker also
+  // records the token it was written with: an older binary overwrites the
+  // token (and purges tag rows) while leaving the marker, and that mismatch
+  // is what forces the re-pull.
+  const marker = `${STORED_TYPES_VERSION}|${state.syncToken ?? ""}`;
+  const tokenMatchesTypes = state.storedTypes === marker;
   let syncToken = tokenMatchesTypes ? state.syncToken : null;
   let cursor: string | null = null;
   let newestToken = syncToken;
@@ -213,6 +217,6 @@ export async function runSync(options: {
     }
   }
 
-  writeSyncState(options.db, newestToken, Date.now(), STORED_TYPES_VERSION);
+  writeSyncState(options.db, newestToken, Date.now(), `${STORED_TYPES_VERSION}|${newestToken ?? ""}`);
   return report;
 }

@@ -7,7 +7,7 @@ import { countItems, openDatabase, readSyncState, writeSyncState } from "./db.ts
 import { listNotes, listTags, noteBody, resolveNote, searchNotes, taggedNoteUuids } from "./notes.ts";
 import { canonicalJson, encrypt004 } from "./sn-crypto/004.ts";
 import type { EncryptedItem } from "./sn-crypto/004.ts";
-import { runSync, toUnixMs } from "./sync-engine.ts";
+import { runSync, STORED_TYPES_VERSION, toUnixMs } from "./sync-engine.ts";
 import type { SyncPage } from "./sn-api.ts";
 
 function hex(): string {
@@ -230,6 +230,42 @@ test("a sync token from a different stored-type set is ignored (full pull)", asy
       },
     });
     expect(calls).toEqual([null, "new-token"]);
+  } finally {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("a marker written for an older token forces a full pull (downgrade wedge)", async () => {
+  const dir = mkdtempSync(join(tmpdir(), "sns-sync-wedge-"));
+  const { master, items } = await fixture();
+  const db = openDatabase(join(dir, "cache.db"), hex());
+  const calls: Array<string | null> = [];
+  try {
+    // an older binary overwrites the sync token (and purges tag rows) while
+    // leaving the stored_types marker behind — the mismatch must full-pull
+    writeSyncState(db, "token-current", 1, `${STORED_TYPES_VERSION}|token-older`);
+    await runSync({
+      db,
+      masterKey: master,
+      ensureMasterKey: async () => master,
+      fetchPage: async (syncToken) => {
+        calls.push(syncToken);
+        return { items, syncToken: "token-current", cursorToken: null, conflicts: 0 };
+      },
+    });
+    expect(calls).toEqual([null]);
+    // repaired: the marker now names the live token, so the next pull is incremental
+    await runSync({
+      db,
+      masterKey: master,
+      ensureMasterKey: async () => master,
+      fetchPage: async (syncToken) => {
+        calls.push(syncToken);
+        return { items: [], syncToken: "token-current", cursorToken: null, conflicts: 0 };
+      },
+    });
+    expect(calls).toEqual([null, "token-current"]);
   } finally {
     db.close();
     rmSync(dir, { recursive: true, force: true });

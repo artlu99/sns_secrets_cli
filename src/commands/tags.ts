@@ -1,4 +1,5 @@
 import { listTags, type ListedTag } from "../notes.ts";
+import { page } from "../pager.ts";
 import { openCache } from "./list.ts";
 
 /**
@@ -56,7 +57,11 @@ export async function tagsCommand(): Promise<void> {
       console.log("no tags in the cache — run sns sync");
       return;
     }
-    console.log(renderTagTree(tags));
+    const tree = renderTagTree(tags);
+    const rows = tree.split("\n").length;
+    const screen = process.stdout.rows ?? 24;
+    if (process.stdout.isTTY && rows > screen - 1) await page(tree);
+    else console.log(tree);
   } finally {
     db.close();
   }

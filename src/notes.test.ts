@@ -115,16 +115,29 @@ test("--all includes key-bearing rows; the default hides them", () => {
         title: null,
         content: JSON.stringify({ itemsKey: "synthetic-key-not-real", version: "004" }),
       },
+      {
+        uuid: "bbbbbbbb-3333-3333-3333-333333333333",
+        content_type: "Tag",
+        updated_at: 500,
+        deleted: 0,
+        title: "prod",
+        content: JSON.stringify({ title: "prod", references: [] }),
+      },
     ]);
     const base = listNotes(db, { limit: 10 });
     expect(base.map((note) => note.content_type)).toEqual(["Note"]);
     const all = listNotes(db, { limit: 10, all: true });
+    // --all adds key-bearing items, never tag rows
     expect(all.map((note) => note.content_type)).toEqual(["Note", "SN|ItemsKey"]);
     expect(all[1]?.title).toBe("SN|ItemsKey");
     const searchAll = searchNotes(db, "synthetic-key", { limit: 10, all: true });
     expect(searchAll.map((hit) => hit.content_type)).toEqual(["SN|ItemsKey"]);
     const searchBase = searchNotes(db, "synthetic-key", { limit: 10 });
     expect(searchBase).toEqual([]);
+    const searchTag = searchNotes(db, "prod", { limit: 10, all: true });
+    expect(searchTag).toEqual([]);
+    // an explicit --type still reaches tags (debugging escape hatch)
+    expect(listNotes(db, { type: "Tag", limit: 10 }).map((row) => row.title)).toEqual(["prod"]);
   } finally {
     db.close();
     rmSync(dir, { recursive: true, force: true });
@@ -236,7 +249,8 @@ test("tags union both link sides and tolerate broken rows", () => {
 
     expect(resolveTag(db, prod).title).toBe("prod");
     expect(resolveTag(db, "eu").title).toBe("eu");
-    expect(() => resolveTag(db, "cccc")).toThrow(UserError);
+    // all four tags share the "cccccccc-aaaa" uuid prefix -> ambiguous
+    expect(() => resolveTag(db, "cccccccc-aaaa")).toThrow(/matches 4 tags/);
     expect(() => resolveTag(db, "zzz")).toThrow(/no tag matches/);
 
     const underEu = listNotes(db, { limit: 10, tagUuids: euUuids });
@@ -423,7 +437,9 @@ test("an explicit folder wins over the inferred parent, untagged notes render la
 
     const table = renderTagGroups(db, listNotes(db, { limit: 10 }));
     const lines = table.split("\n");
-    expect(lines[0]).toBe("big (0)");
+    // counts are subtree totals over the listed notes: big has none directly,
+    // but its child chain lists one
+    expect(lines[0]).toBe("big (1)");
     expect(lines[1]).toBe("  leaf (1)");
     // `small` holds the note too, but its set equals leaf's, so it folds under
     // leaf (alphabetical) — the note still renders exactly once, in the chain
@@ -433,6 +449,241 @@ test("an explicit folder wins over the inferred parent, untagged notes render la
     expect(lines[5]).toBe("(untagged) (1)");
     expect(lines[6]).toContain("eeeeeeee-5555-5555-5555-555555555555");
     expect(table.match(/eeeeeeee-4444/g)?.length).toBe(1);
+  } finally {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("explicit folder nesting does not depend on tag row order", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sns-folder-order-"));
+  const db = openDatabase(join(dir, "cache.db"), randomBytes(32).toString("hex"));
+  const parent = "ffff0000-1111-1111-1111-111111111111";
+  const child = "ffff0000-2222-2222-2222-222222222222";
+  try {
+    upsertItems(db, [
+      {
+        // synced first: when the child is processed, the parent is not yet in
+        // the resolved map — the explicit link must survive anyway
+        uuid: child,
+        content_type: "Tag",
+        updated_at: 1_000,
+        deleted: 0,
+        title: "child",
+        content: JSON.stringify({
+          title: "child",
+          references: [{ uuid: parent, content_type: "Tag" }],
+        }),
+      },
+      {
+        uuid: parent,
+        content_type: "Tag",
+        updated_at: 2_000,
+        deleted: 0,
+        title: "zulu",
+        content: JSON.stringify({ title: "zulu", references: [] }),
+      },
+    ]);
+    expect(listTags(db).find((tag) => tag.title === "child")?.parent).toBe(parent);
+  } finally {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("hard-deleted and trashed notes stop counting toward tags", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sns-phantom-"));
+  const db = openDatabase(join(dir, "cache.db"), randomBytes(32).toString("hex"));
+  const work = "ffff1000-1111-1111-1111-111111111111";
+  const dead = "ffff1000-2222-2222-2222-222222222222";
+  const trashed = "ffff1000-3333-3333-3333-333333333333";
+  const live = "ffff1000-4444-4444-4444-444444444444";
+  try {
+    upsertItems(db, [
+      {
+        // the tag's references still name a note deleted on another device
+        uuid: work,
+        content_type: "Tag",
+        updated_at: 1_000,
+        deleted: 0,
+        title: "work",
+        content: JSON.stringify({
+          title: "work",
+          references: [
+            { uuid: dead, content_type: "Note" },
+            { uuid: trashed, content_type: "Note" },
+            { uuid: live, content_type: "Note" },
+          ],
+        }),
+      },
+      {
+        uuid: dead,
+        content_type: "Note",
+        updated_at: 900,
+        deleted: 1,
+        title: null,
+        content: "{}",
+      },
+      {
+        uuid: trashed,
+        content_type: "Note",
+        updated_at: 800,
+        deleted: 0,
+        title: "Trashed",
+        content: JSON.stringify({ title: "Trashed", trashed: true }),
+      },
+      {
+        uuid: live,
+        content_type: "Note",
+        updated_at: 700,
+        deleted: 0,
+        title: "Live",
+        content: JSON.stringify({ title: "Live", text: "x" }),
+      },
+    ]);
+    const workTag = listTags(db).find((tag) => tag.title === "work");
+    expect(workTag?.notes).toBe(1);
+    const uuids = taggedNoteUuids(db, work);
+    expect(uuids.has(live)).toBe(true);
+    expect(uuids.has(dead)).toBe(false);
+    expect(uuids.has(trashed)).toBe(false);
+  } finally {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("list --tag on a folder reaches notes under its child tags", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sns-subtree-"));
+  const db = openDatabase(join(dir, "cache.db"), randomBytes(32).toString("hex"));
+  const folder = "ffff2000-1111-1111-1111-111111111111";
+  const leaf = "ffff2000-2222-2222-2222-222222222222";
+  const note = "ffff2000-3333-3333-3333-333333333333";
+  try {
+    upsertItems(db, [
+      {
+        uuid: folder,
+        content_type: "Tag",
+        updated_at: 2_000,
+        deleted: 0,
+        title: "big",
+        content: JSON.stringify({ title: "big", references: [] }),
+      },
+      {
+        uuid: leaf,
+        content_type: "Tag",
+        updated_at: 1_000,
+        deleted: 0,
+        title: "leaf",
+        content: JSON.stringify({
+          title: "leaf",
+          references: [
+            { uuid: folder, content_type: "Tag" },
+            { uuid: note, content_type: "Note" },
+          ],
+        }),
+      },
+      {
+        uuid: note,
+        content_type: "Note",
+        updated_at: 3_000,
+        deleted: 0,
+        title: "child",
+        content: JSON.stringify({
+          title: "child",
+          text: "x",
+          references: [{ uuid: leaf, content_type: "Tag" }],
+        }),
+      },
+    ]);
+    // the list renders the note under big -> leaf; --tag big must find it too
+    const uuids = taggedNoteUuids(db, folder);
+    expect(uuids.has(note)).toBe(true);
+    expect(listNotes(db, { limit: 10, tagUuids: uuids }).map((row) => row.title)).toEqual(["child"]);
+  } finally {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("header counts reflect the listed notes, not the whole cache", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sns-counts-"));
+  const db = openDatabase(join(dir, "cache.db"), randomBytes(32).toString("hex"));
+  const prod = "ffff3000-1111-1111-1111-111111111111";
+  const noteA = "ffff3000-2222-2222-2222-222222222222";
+  const noteB = "ffff3000-3333-3333-3333-333333333333";
+  try {
+    upsertItems(db, [
+      {
+        uuid: prod,
+        content_type: "Tag",
+        updated_at: 1_000,
+        deleted: 0,
+        title: "prod",
+        content: JSON.stringify({
+          title: "prod",
+          references: [
+            { uuid: noteA, content_type: "Note" },
+            { uuid: noteB, content_type: "Note" },
+          ],
+        }),
+      },
+      {
+        uuid: noteA,
+        content_type: "Note",
+        updated_at: 4_000,
+        deleted: 0,
+        title: "Alpha",
+        content: JSON.stringify({ title: "Alpha", references: [{ uuid: prod, content_type: "Tag" }] }),
+      },
+      {
+        uuid: noteB,
+        content_type: "Note",
+        updated_at: 3_000,
+        deleted: 0,
+        title: "Beta",
+        content: JSON.stringify({ title: "Beta", references: [{ uuid: prod, content_type: "Tag" }] }),
+      },
+    ]);
+    // --limit cut Beta out: the header must not claim it
+    const table = renderTagGroups(db, listNotes(db, { limit: 1 }));
+    expect(table.split("\n")[0]).toBe("prod (1)");
+    expect(table).not.toContain("Beta");
+  } finally {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("tag titles are whitespace-normalized for rendering and matching", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sns-title-"));
+  const db = openDatabase(join(dir, "cache.db"), randomBytes(32).toString("hex"));
+  const messy = "ffff4000-1111-1111-1111-111111111111";
+  const note = "ffff4000-2222-2222-2222-222222222222";
+  try {
+    upsertItems(db, [
+      {
+        uuid: messy,
+        content_type: "Tag",
+        updated_at: 1_000,
+        deleted: 0,
+        title: "a\nb",
+        content: JSON.stringify({ title: "a\nb", references: [{ uuid: note, content_type: "Note" }] }),
+      },
+      {
+        uuid: note,
+        content_type: "Note",
+        updated_at: 2_000,
+        deleted: 0,
+        title: "child",
+        content: JSON.stringify({ title: "child", references: [{ uuid: messy, content_type: "Tag" }] }),
+      },
+    ]);
+    const table = renderTagGroups(db, listNotes(db, { limit: 10 }));
+    expect(table.split("\n")[0]).toBe("a b (1)");
+    expect(table).not.toContain("a\nb");
+    // resolution matches the normalized title too
+    expect(resolveTag(db, "a b").uuid).toBe(messy);
   } finally {
     db.close();
     rmSync(dir, { recursive: true, force: true });
