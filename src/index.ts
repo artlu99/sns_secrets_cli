@@ -67,9 +67,8 @@ program
   .description("show a note's setting keys and prose (values stay in the cache)")
   .argument("<id>", "uuid or title prefix")
   .option("--no-pager", "print without paging")
-  .option("--raw", "print the full note body, setting values included")
-  .action(async (id: string, options: { pager?: boolean; raw?: boolean }) => {
-    await showCommand(id, { noPager: options.pager === false, raw: options.raw });
+  .action(async (id: string, options: { pager?: boolean }) => {
+    await showCommand(id, { noPager: options.pager === false });
   });
 
 program

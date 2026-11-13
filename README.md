@@ -59,7 +59,7 @@ TOKEN=  (empty)
 copy a value:  sns copy staging DB_HOST
 ```
 
-An empty value is marked `(empty)`, and a trailing `# comment` from the note shows beside its key with the value redacted out — assignment-shaped text the parser rejected (`# OLD_KEY=…`, a mention mid-sentence) is masked the same way, so no value reaches the terminal. On a terminal, comments and the redaction markers render dim and keys stay bright; piped output and `NO_COLOR` are plain monochrome. `sns show <id> --raw` prints the note's full text instead.
+An empty value is marked `(empty)`, and a trailing `# comment` from the note shows beside its key with the value redacted out — assignment-shaped text the parser rejected (`# OLD_KEY=…`, a mention mid-sentence) is masked the same way, so no value reaches the terminal. On a terminal, comments and the redaction markers render dim and keys stay bright; piped output and `NO_COLOR` are plain monochrome. There is no full-text view: the raw note belongs to Standard Notes, and its mobile and desktop apps are where you read it.
 
 `sns copy <id> <key>` copies one setting's value. The key is matched exactly and case-sensitively; `API` does not select `API_KEY`. Only the byte count is printed:
 
@@ -67,11 +67,11 @@ An empty value is marked `(empty)`, and a trailing `# comment` from the note sho
 copied API_KEY (32 bytes, clears in 30s)
 ```
 
-`sns copy <id>` with no key copies nothing when the note has settings — it prints the key names and the two-argument form, so the short command stays the safe one. A missing key exits non-zero the same way. A note without settings still copies its whole body; for that note, the body is the only copy there is. Values reach the clipboard only through `copy`, one key at a time — `show` prints keys and prose only, and puts values on the terminal only through `--raw`. Two paths still print a whole note: `search` matches full content, so a hit's snippet can carry a value, and the interactive picker's View pages the full text.
+`sns copy <id>` with no key copies nothing when the note has settings — it prints the key names and the two-argument form, so the short command stays the safe one. A missing key exits non-zero the same way. A note without settings still copies its whole body; for that note, the body is the only copy there is. Values reach the clipboard only through `copy`, one key at a time — no command prints one. `show` prints keys and prose only, the picker's View draws the same inventory, and `search` still matches full content but cuts its snippet from the masked text, so a hit on a value shows `KEY=[redacted]`.
 
 ## Everything else
 
-`sns` with no arguments asks for a filter, then offers to view or copy the note you pick. `list` renders the tag tree: explicit SN folders (nested tags) win, otherwise containment is inferred from note membership — a tag whose notes all also sit in a bigger tag nests under it (so `data` folds inside `infra` when every data note is also tagged infra). Each note appears exactly once, under its deepest tag; group headers show the tag's full note count, newest first within each, untagged notes last. `list` and `search` hide key-bearing items unless you pass `--all`. `tags` lists every tag and folder as a tree with note counts — read-only, the CLI never creates or edits them. `list --tag` filters notes under a tag or folder, matched by title or uuid prefix. `show` sends full-text output (and `--raw`) through a pager on standard input so the text is never written to a temp file; the key inventory, which carries no values, prints directly and pages only when taller than the screen; `--no-pager` prints to standard output. `sync` pulls again and asks for the password only when a new items key cannot be unwrapped with keys already in the cache. `logout` revokes the server session and deletes the local session, the cache key, and the cache. `doctor` reports whether the runtime, keychain, session file, and cache look right.
+`sns` with no arguments asks for a filter, then offers to view or copy the note you pick. `list` renders the tag tree: explicit SN folders (nested tags) win, otherwise containment is inferred from note membership — a tag whose notes all also sit in a bigger tag nests under it (so `data` folds inside `infra` when every data note is also tagged infra). Each note appears exactly once, under its deepest tag; group headers show the tag's full note count, newest first within each, untagged notes last. `list` and `search` hide key-bearing items unless you pass `--all`. `tags` lists every tag and folder as a tree with note counts — read-only, the CLI never creates or edits them. `list --tag` filters notes under a tag or folder, matched by title or uuid prefix. The key inventory `show` prints — which carries no values, as everywhere — prints directly and pages only when taller than the screen; `--no-pager` prints to standard output, and paged text goes through the pager on standard input so it is never written to a temp file. `sync` pulls again and asks for the password only when a new items key cannot be unwrapped with keys already in the cache. `logout` revokes the server session and deletes the local session, the cache key, and the cache. `doctor` reports whether the runtime, keychain, session file, and cache look right.
 
 ## Where the files are
 
@@ -85,6 +85,10 @@ Everything lives in `~/.config/sn_secrets_cli/` (override with `SNS_CONFIG_DIR`)
 | `cache.db` | Decrypted notes, inside a `chacha20` database. |
 
 The cache key is random. The account password cannot reopen `cache.db`. One key opens every synced note. When a secret service is available, the dotenvx private key is stored in the OS keychain and `.env.keys` is removed. [SECURITY.md](SECURITY.md) describes what a disk copy can read in that case, and what it can read when the key stays in `.env.keys`.
+
+## TODO
+
+- web client — a local browser UI over the same encrypted cache, under the same redaction rules as the CLI.
 
 ## Development
 

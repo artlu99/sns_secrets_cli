@@ -159,7 +159,7 @@ export function searchNotes(
       title: title || label(row),
       trashed: false,
       settings: noteSettings(row).size,
-      snippet: snippet(haystack, pattern, needle),
+      snippet: snippet(snippetSource(row), pattern, needle),
     });
     if (hits.length >= options.limit) break;
   }
@@ -180,6 +180,35 @@ function snippet(haystack: string, pattern: RegExp | null, needle: string): stri
   const end = Math.min(flat.length, index + 60);
   const slice = flat.slice(start, end);
   return `${start > 0 ? "…" : ""}${slice}${end < flat.length ? "…" : ""}`.slice(0, 80);
+}
+
+/** An assignment line as the parser sees one: optional `export`, the key
+ * charset, `=`, then a quoted span (which may cross lines) or the line's rest. */
+const ASSIGNMENT_LINE =
+  /^[ \t]*(?:export[ \t]+)?([A-Za-z0-9_.-]+)[ \t]*=(?:"[^"]*"|'[^']*'|`[^`]*`|[^\n]*)/gm;
+
+/**
+ * Collapse every assignment-shaped line to `KEY=[redacted]` — quoted spans,
+ * unclosed quotes, and unquoted values included — then mask rejected inline
+ * fragments the way the show inventory does. The line-level pass runs first
+ * because the fragment mask cannot catch a quoted value's continuation lines:
+ * masking the decoded body this way is what lets a snippet be cut from text a
+ * value may have once been in.
+ */
+function maskAssignments(text: string): string {
+  return redactAssignments(text.replace(ASSIGNMENT_LINE, "$1=[redacted]"));
+}
+
+/**
+ * The only text a search snippet may be cut from, so matching full content
+ * never puts a value on stdout. Notes: the decoded body, every assignment
+ * collapsed (`maskAssignments`) — a hit on a value shows `KEY=[redacted]`,
+ * never the value. Other rows (the key-bearing items `--all` can surface):
+ * the JSON body noteBody already field-redacts.
+ */
+function snippetSource(row: ItemRow): string {
+  const decoded = proseText(row);
+  return decoded === null ? redactAssignments(noteBody(row).body) : maskAssignments(decoded);
 }
 
 /**
@@ -333,8 +362,10 @@ const titleComparator = (titleOf: Map<string, string>) => (a: string, b: string)
  * smallest such tag (alphabetical tie-break). Equal sets fold onto the
  * alphabetically-first tag, which keeps the parent chain acyclic and makes a
  * note with overlapping tags render exactly once, under its deepest tag.
+ * Exported for the extension's tag tree (extension/lib/tags.ts) — the CLI's
+ * own callers go through tagGraph.
  */
-function resolveParents(links: TagLinks): Map<string, string | null> {
+export function resolveParents(links: TagLinks): Map<string, string | null> {
   const tags = [...links.titleOf.keys()];
   const parentOf = new Map<string, string | null>();
   const byTitle = titleComparator(links.titleOf);
@@ -549,11 +580,12 @@ function stripSgr(text: string): string {
 /**
  * Mask `key=value` fragments in free text the inventory renders verbatim. The
  * parser rejects these lines (a commented-out `# OLD_KEY=…`, a mention
- * mid-sentence), so a value written that way would otherwise reach stdout
- * without `--raw` — the one thing this view promises never happens. Only
- * display: parsing itself is untouched.
+ * mid-sentence), so a value written that way would otherwise reach stdout —
+ * the one thing this view promises never happens. Only display: parsing
+ * itself is untouched. Exported for the extension, whose prose view renders
+ * the same redaction over the same prose.
  */
-function redactAssignments(text: string): string {
+export function redactAssignments(text: string): string {
   return text.replace(/(^|[ \t])([A-Za-z0-9_.-]+)[ \t]*=[ \t]*\S+/gm, "$1$2=[redacted]");
 }
 

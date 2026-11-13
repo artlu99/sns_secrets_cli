@@ -1,8 +1,9 @@
 import { intro, outro, select } from "@clack/prompts";
 import { listNotes, noteBody, planCopy, resolveNote, searchNotes } from "../notes.ts";
-import { page } from "../pager.ts";
+import { pageIfTall } from "../pager.ts";
 import { openCache } from "./list.ts";
 import { runCopyPlan } from "./copy.ts";
+import { inventoryText } from "./show.ts";
 import { promptLine, unwrap } from "./prompt.ts";
 
 export async function browseCommand(): Promise<void> {
@@ -44,7 +45,9 @@ export async function browseCommand(): Promise<void> {
       if (action === "back") continue;
       const row = resolveNote(db, selected, { all: false });
       const note = noteBody(row);
-      if (action === "view") await page(`${note.title}\n\n${note.body}`);
+      // View draws the same masked inventory `sns show` does — there is no
+      // full-text view here either; the note itself lives in Standard Notes
+      if (action === "view") await pageIfTall(inventoryText(row, note.title), { warn: false });
       // the same plan as `sns copy`: on a settings note the picker copies one
       // chosen value, never the whole body
       if (action === "copy") await runCopyPlan(note.title, planCopy(row, undefined));

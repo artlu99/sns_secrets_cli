@@ -18,6 +18,7 @@ import {
   taggedNoteUuids,
 } from "./notes.ts";
 import { renderTagTree } from "./commands/tags.ts";
+import { inventoryText } from "./commands/show.ts";
 import { UserError } from "./errors.ts";
 
 test("list hides trashed notes and non-note types", () => {
@@ -927,6 +928,78 @@ test("planCopy picks the value, the key list, or the body", () => {
     expect(planCopy(journal, undefined)).toEqual({ kind: "body", body: "thoughts" });
     // a key on a note without settings is an error, not a silent body copy
     expect(() => planCopy(journal, "KEY")).toThrow(/has no KEY=VALUE settings/);
+  } finally {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("search matches full content but the snippet never carries a value", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sns-snippet-"));
+  const db = openDatabase(join(dir, "cache.db"), randomBytes(32).toString("hex"));
+  try {
+    upsertItems(db, [
+      {
+        uuid: "dddddddd-1111-1111-1111-111111111111",
+        content_type: "Note",
+        updated_at: 2_000,
+        deleted: 0,
+        title: "Staging",
+        content: JSON.stringify({
+          title: "Staging",
+          text: 'ask Alice first\nAPI_KEY=sk-live-999\nTOKEN="hunter two hidden"\nBROKEN="oops-no-close\nstaging notes here',
+        }),
+      },
+    ] satisfies ItemRow[]);
+    // a hit on the value itself still matches, and shows the masked line
+    const byValue = searchNotes(db, "sk-live-999", { limit: 10 });
+    expect(byValue).toHaveLength(1);
+    expect(byValue[0]!.snippet).toContain("API_KEY=[redacted]");
+    expect(byValue[0]!.snippet).not.toContain("sk-live-999");
+    // a quoted value loses its continuation words to the line-level mask
+    const byTail = searchNotes(db, "hidden", { limit: 10 });
+    expect(byTail).toHaveLength(1);
+    expect(byTail[0]!.snippet).not.toContain("hunter two");
+    expect(byTail[0]!.snippet).toContain("TOKEN=[redacted]");
+    // an unclosed quote — a half-written secret — masks the same way
+    const byBroken = searchNotes(db, "oops-no-close", { limit: 10 });
+    expect(byBroken).toHaveLength(1);
+    expect(byBroken[0]!.snippet).not.toContain("oops-no-close");
+    expect(byBroken[0]!.snippet).toContain("BROKEN=[redacted]");
+    // prose keeps matching and showing as before
+    const byProse = searchNotes(db, "staging notes", { limit: 10 });
+    expect(byProse).toHaveLength(1);
+    expect(byProse[0]!.snippet).toContain("staging notes here");
+  } finally {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("inventoryText renders a keyless note as masked prose — the only view there is", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sns-inventory-"));
+  const db = openDatabase(join(dir, "cache.db"), randomBytes(32).toString("hex"));
+  try {
+    upsertItems(db, [
+      {
+        uuid: "eeeeeeee-1111-1111-1111-111111111111",
+        content_type: "Note",
+        updated_at: 2_000,
+        deleted: 0,
+        title: "Journal",
+        content: JSON.stringify({
+          title: "Journal",
+          text: "thoughts about staging\nthe old line was TOKEN=hunter2\nand DONE=yes, mostly",
+        }),
+      },
+    ] satisfies ItemRow[]);
+    const text = inventoryText(resolveNote(db, "Journal"), "Journal");
+    // the whole body shows as prose — rejected fragments masked, no hint
+    expect(text).toContain("thoughts about staging");
+    expect(text).toContain("the old line was TOKEN=[redacted]");
+    expect(text).toContain("and DONE=[redacted] mostly");
+    expect(text).not.toContain("hunter2");
+    expect(text).not.toContain("copy a value");
   } finally {
     db.close();
     rmSync(dir, { recursive: true, force: true });
