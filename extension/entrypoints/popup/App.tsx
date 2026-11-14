@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState } from "react";
 import { browser } from "wxt/browser";
+import { useAutoLock } from "../../components/auto-lock.ts";
 import { MfaForm, UnlockForm } from "../../components/UnlockForm.tsx";
 import { copySecret } from "../../lib/clipboard.ts";
 import { loadSession, loadSettings, type VaultSession } from "../../lib/session.ts";
@@ -25,8 +26,10 @@ export default function App() {
   const [view, setView] = useState<VaultView | null>(null);
   const [query, setQuery] = useState("");
   const [copied, setCopied] = useState<string | null>(null);
+  const [autoLocked, setAutoLocked] = useState(false);
   const copyTimer = useRef<number | null>(null);
   const mfaResolver = useRef<((code: string) => void) | null>(null);
+  useAutoLock(phase === "ready", () => void lock("auto"));
 
   useEffect(() => {
     void boot();
@@ -85,6 +88,7 @@ export default function App() {
           }),
       });
       setPassword("");
+      setAutoLocked(false);
       setSession(next);
       await refresh(next);
     } catch (caught) {
@@ -109,8 +113,9 @@ export default function App() {
     });
   }
 
-  async function lock(): Promise<void> {
+  async function lock(reason?: "auto"): Promise<void> {
     await lockVault();
+    setAutoLocked(reason === "auto");
     setSession(null);
     setView(null);
     setQuery("");
@@ -138,6 +143,7 @@ export default function App() {
           busy={phase === "working"}
           status={status}
           error={error}
+          notice={autoLocked ? "Locked after inactivity — sign in again." : ""}
           compact
           onSubmit={() => void submitUnlock()}
         />

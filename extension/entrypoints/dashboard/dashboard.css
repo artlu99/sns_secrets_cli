@@ -185,6 +185,7 @@ input:focus { border-color: var(--accent); }
 }
 .primary:disabled { opacity: 0.6; cursor: default; }
 
+.notice { color: var(--ok); margin: 4px 0; }
 .error { color: var(--err); margin: 10px 14px; white-space: pre-wrap; }
 .hint { color: var(--dim); }
 .padded { padding: 12px; }

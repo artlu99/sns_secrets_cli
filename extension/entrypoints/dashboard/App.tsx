@@ -1,5 +1,6 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { noteBody } from "../../../src/notes.ts";
+import { useAutoLock } from "../../components/auto-lock.ts";
 import { MfaForm, UnlockForm } from "../../components/UnlockForm.tsx";
 import { copySecret } from "../../lib/clipboard.ts";
 import { loadSession, loadSettings, type VaultSession } from "../../lib/session.ts";
@@ -33,8 +34,10 @@ export default function App() {
   const [copied, setCopied] = useState<{ label: string; scheduled: boolean } | null>(null);
   const [syncedAt, setSyncedAt] = useState<number | null>(null);
   const [syncing, setSyncing] = useState(false);
+  const [autoLocked, setAutoLocked] = useState(false);
   const copyTimer = useRef<number | null>(null);
   const mfaResolver = useRef<((code: string) => void) | null>(null);
+  useAutoLock(phase === "ready", () => void lock("auto"));
 
   useEffect(() => {
     void boot();
@@ -96,6 +99,7 @@ export default function App() {
           }),
       });
       setPassword("");
+      setAutoLocked(false);
       setSession(next);
       await refresh(next);
     } catch (caught) {
@@ -129,8 +133,9 @@ export default function App() {
     });
   }
 
-  async function lock(): Promise<void> {
+  async function lock(reason?: "auto"): Promise<void> {
     await lockVault();
+    setAutoLocked(reason === "auto");
     setSession(null);
     setView(null);
     setPhase("locked");
@@ -154,6 +159,7 @@ export default function App() {
             busy={phase === "working"}
             status={status}
             error={error}
+            notice={autoLocked ? "Locked after inactivity — sign in again." : ""}
             onSubmit={() => void submitUnlock()}
           />
         )}

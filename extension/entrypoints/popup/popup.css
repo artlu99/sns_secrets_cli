@@ -91,6 +91,7 @@ input[type="search"] { flex: 1; }
 .linkish:hover { text-decoration: underline; }
 .ghost:hover, .linkish:hover { background: var(--panel-2); }
 
+.notice { color: var(--ok); margin: 4px 0; }
 .error { color: var(--err); margin: 4px 0; white-space: pre-wrap; }
 
 .hint { color: var(--dim); padding: 2px 4px; }

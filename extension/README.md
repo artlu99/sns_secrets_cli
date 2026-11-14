@@ -50,6 +50,11 @@ print **Finished**, then Reload.
   network traffic is to the Standard Notes API (declared:
   `api.standardnotes.com`; a self-hosted server URL is requested as an
   optional permission at first login, on the click's user gesture).
+- **Auto-lock**: after 5 minutes without input (pointer, keys, wheel, scroll)
+  — or after 2 minutes with the dashboard tab hidden — both surfaces re-gate
+  to the login form and the session is wiped from session storage, exactly
+  like the lock button. The durations are constants at the top of
+  `components/auto-lock.ts`.
 - MV3 CSP: no remote code; `'wasm-unsafe-eval'` is present solely so
   libsodium's WASM can run.
 
@@ -85,9 +90,3 @@ cursor exhausts. The tag graph reuses `resolveParents`/`tagForest` from
 - Store listing (unpacked loading is per-browser).
 - Optional: encrypted-at-rest cache via IndexedDB for instant reopen across
   browser restarts (password re-entry per session would still be required).
-- Idle auto-lock: the unlocked dashboard currently stays unlocked until the
-  lock button or browser exit. Reset a timer on user activity and call
-  `lockVault()` on expiry, so both surfaces re-gate.
-- Lock on hidden: lock when the dashboard tab has been hidden
-  (`visibilitychange`) for a few minutes — stricter than idle-lock, since a
-  hidden vault tab usually means walked away.

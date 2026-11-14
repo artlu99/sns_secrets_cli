@@ -10,6 +10,8 @@ export type UnlockFormProps = {
   busy: boolean;
   status: string;
   error: string;
+  /** Dim positive line above the error — e.g. why the form re-gated. */
+  notice?: string;
   compact?: boolean;
   onSubmit: () => void;
 };
@@ -58,6 +60,7 @@ export function UnlockForm(props: UnlockFormProps) {
       <button className="linkish" type="button" onClick={() => setShowServer((shown) => !shown)}>
         {showServer ? "hide server" : "self-hosted server…"}
       </button>
+      {props.notice ? <p className="notice">{props.notice}</p> : null}
       {props.error !== "" ? <p className="error" role="alert">{props.error}</p> : null}
       <button className="primary" type="submit" disabled={props.busy}>
         {props.busy ? props.status || "Working…" : "Unlock"}
