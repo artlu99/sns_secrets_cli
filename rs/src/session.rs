@@ -86,6 +86,9 @@ impl SessionPrivateKey {
     pub fn from_hex(hex_str: &str) -> Result<Self, SessionError> {
         let raw = hex::decode(hex_str).map_err(|_| SessionError::InvalidPrivateKey)?;
         let bytes: [u8; 32] = raw.try_into().map_err(|_| SessionError::InvalidPrivateKey)?;
+        // Reject scalars outside [1, n-1]: a zero or over-order key from a
+        // corrupted .env.keys would panic at first use otherwise.
+        SecretKey::from_slice(&bytes).map_err(|_| SessionError::InvalidPrivateKey)?;
         Ok(Self(Zeroizing::new(bytes)))
     }
 
@@ -233,7 +236,8 @@ pub struct ParsedSession {
 }
 
 /// Parse a session file. Comment and blank lines are ignored; the public-key
-/// header is lifted out, everything else stays a name/value pair.
+/// header is lifted out, everything else stays a name/value pair. Duplicate
+/// keys resolve last-wins, matching the dotenvx parser this replaces.
 pub fn parse_session_file(text: &str) -> Result<ParsedSession, SessionError> {
     let mut parsed = ParsedSession { public_key_base64: None, fields: Vec::new() };
     for line in text.lines() {
@@ -244,6 +248,8 @@ pub fn parse_session_file(text: &str) -> Result<ParsedSession, SessionError> {
         let (name, value) = trimmed.split_once('=').ok_or(SessionError::MalformedRecord)?;
         if name == PUBLIC_KEY_FIELD {
             parsed.public_key_base64 = Some(value.to_string());
+        } else if let Some(existing) = parsed.fields.iter_mut().find(|(key, _)| key == name) {
+            existing.1 = value.to_string();
         } else {
             parsed.fields.push((name.to_string(), value.to_string()));
         }

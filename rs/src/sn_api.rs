@@ -6,13 +6,14 @@
 
 use base64::engine::general_purpose::{STANDARD as BASE64, URL_SAFE_NO_PAD};
 use base64::Engine as _;
+use serde::Deserialize;
 use serde_json::{json, Map, Value};
 use sha2::{Digest, Sha256};
 use std::sync::LazyLock;
 
 use crate::http::{
-    cookie_pair, post_request, send_json, ApiError, Fetch, HttpError, HttpRequest, HttpResponse,
-    SendResult, API_VERSION, CLIENT_HEADERS,
+    cookie_pair, delete_request, post_request, send_json, ApiError, Fetch, HttpError,
+    HttpRequest, HttpResponse, SendResult, API_VERSION,
 };
 use crate::kdf::{self, KdfParams};
 use crate::proto004::EncryptedItem;
@@ -20,7 +21,7 @@ use crate::proto004::EncryptedItem;
 /// `src/session-file.ts`'s SessionSecrets. The db_key is the one secret this
 /// struct carries; it moves to a Zeroizing type when the session-file port
 /// lands and the field stops crossing module boundaries as a plain string.
-#[derive(Debug, Clone, PartialEq, Eq)]
+#[derive(Clone, PartialEq, Eq)]
 pub struct SessionSecrets {
     pub account_email: String,
     pub refresh_token: String,
@@ -30,6 +31,21 @@ pub struct SessionSecrets {
     pub access_cookie: String,
     pub refresh_cookie: String,
     pub db_key: String,
+}
+
+impl core::fmt::Debug for SessionSecrets {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("SessionSecrets")
+            .field("account_email", &self.account_email)
+            .field("refresh_token", &"[redacted]")
+            .field("access_token", &"[redacted]")
+            .field("access_expiration_ms", &self.access_expiration_ms)
+            .field("refresh_expiration_ms", &self.refresh_expiration_ms)
+            .field("access_cookie", &"[redacted]")
+            .field("refresh_cookie", &"[redacted]")
+            .field("db_key", &"[redacted]")
+            .finish()
+    }
 }
 
 #[derive(Debug, PartialEq, Eq)]
@@ -98,6 +114,15 @@ fn as_record(value: &Value) -> Option<&Map<String, Value>> {
     value.as_object()
 }
 
+/// TS's `??` chain over field names: the first present, non-null value wins —
+/// a JSON `null` under the primary name falls through to the alias.
+fn field<'a>(object: &'a Map<String, Value>, names: &[&str]) -> Option<&'a Value> {
+    names
+        .iter()
+        .filter_map(|name| object.get(*name))
+        .find(|value| !value.is_null())
+}
+
 /// `data` when it is an object, else the root itself — the TS `unwrap`.
 fn unwrapped(body: &Value) -> &Map<String, Value> {
     let data = body.as_object().and_then(|object| object.get("data")).and_then(Value::as_object);
@@ -119,8 +144,27 @@ fn number_or_undefined(value: Option<&Value>) -> Option<f64> {
         // Integer-backed JSON numbers are common (kdf_iterations: 5); only
         // non-finite floats are rejected.
         Some(Value::Number(number)) => number.as_f64().filter(|value| value.is_finite()),
-        Some(Value::String(text)) if !text.is_empty() => text.parse().ok(),
+        Some(Value::String(text)) if !text.is_empty() => text.parse::<f64>().ok().filter(|value| value.is_finite()),
         _ => None,
+    }
+}
+
+/// Server-controlled numbers become integer params only when finite and in
+/// range: an "inf" or 5e9 kdf_iterations must fall back to the default, not
+/// saturate into a decades-long Argon2id run.
+fn bounded_u32(value: f64) -> Option<u32> {
+    if (0.0..=u32::MAX as f64).contains(&value) {
+        Some(value as u32)
+    } else {
+        None
+    }
+}
+
+fn bounded_u64(value: f64) -> Option<u64> {
+    if (0.0..=u64::MAX as f64).contains(&value) {
+        Some(value as u64)
+    } else {
+        None
     }
 }
 
@@ -134,15 +178,22 @@ pub struct MfaChallenge {
 /// real shape) an HTTP error body.
 pub fn mfa_challenge(body: &Value) -> Option<MfaChallenge> {
     let data = unwrapped(body);
-    let error = data.get("error").or_else(|| as_record(body).and_then(|object| object.get("error")))?;
+    // TS's asRecord() chains: a non-object error under `data` falls through
+    // to the root's error.
+    let error = data
+        .get("error")
+        .filter(|value| value.is_object())
+        .or_else(|| as_record(body).and_then(|object| object.get("error")))
+        .filter(|value| value.is_object())?;
     let tag = coerce_string(error.get("tag"));
     if tag != "mfa-required" && tag != "mfa-invalid" {
         return None;
     }
-    let mfa_key = coerce_string(error.get("payload").and_then(|payload| payload.get("mfa_key")));
-    if mfa_key.is_empty() {
-        return None;
-    }
+    // TS requires typeof mfa_key === "string" — a number is no challenge.
+    let mfa_key = match error.get("payload").and_then(|payload| payload.get("mfa_key")) {
+        Some(Value::String(text)) if !text.is_empty() => text.clone(),
+        _ => return None,
+    };
     let message = match error.get("message") {
         Some(Value::String(text)) => text.clone(),
         _ => "Two-factor code required".to_string(),
@@ -154,10 +205,10 @@ pub fn parse_key_params(body: &Value) -> Result<KdfParams, ApiClientError> {
     let data = unwrapped(body);
     let version = coerce_string(data.get("version"));
     let identifier = coerce_string(data.get("identifier"));
-    let pw_nonce = coerce_string(data.get("pw_nonce").or_else(|| data.get("pwNonce")));
-    let iterations = number_or_undefined(data.get("kdf_iterations")).map(|value| value as u32);
-    let memory = number_or_undefined(data.get("kdf_memory")).map(|value| value as u64);
-    let parallelism = number_or_undefined(data.get("kdf_parallelism")).map(|value| value as u32);
+    let pw_nonce = coerce_string(field(data, &["pw_nonce", "pwNonce"]));
+    let iterations = number_or_undefined(data.get("kdf_iterations")).and_then(bounded_u32);
+    let memory = number_or_undefined(data.get("kdf_memory")).and_then(bounded_u64);
+    let parallelism = number_or_undefined(data.get("kdf_parallelism")).and_then(bounded_u32);
     if version.is_empty() || identifier.is_empty() || pw_nonce.is_empty() {
         return Err(ApiClientError::User(
             "login parameters were missing version, identifier, or salt seed".into(),
@@ -192,12 +243,8 @@ pub fn parse_session_body(
     if access_token.is_empty() || refresh_token.is_empty() {
         return Err(ApiClientError::User("login response did not include session tokens".into()));
     }
-    let access_expiration = session
-        .get("access_expiration")
-        .or_else(|| session.get("access_token_expiration"));
-    let refresh_expiration = session
-        .get("refresh_expiration")
-        .or_else(|| session.get("refresh_token_expiration"));
+    let access_expiration = field(session, &["access_expiration", "access_token_expiration"]);
+    let refresh_expiration = field(session, &["refresh_expiration", "refresh_token_expiration"]);
     Ok(SessionSecrets {
         account_email: String::new(),
         refresh_token,
@@ -226,7 +273,7 @@ pub fn parse_sync_page(body: &Value) -> SyncPage {
         .map(|array| {
             array
                 .iter()
-                .filter_map(|item| serde_json::from_value(item.clone()).ok())
+                .filter_map(|item| EncryptedItem::deserialize(item).ok())
                 .collect()
         })
         .unwrap_or_default();
@@ -394,29 +441,13 @@ impl ApiClient {
     }
 
     pub fn logout(&self, secrets: &SessionSecrets) -> Result<(), ApiClientError> {
-        let mut headers: Vec<(String, String)> = Vec::new();
-        if !secrets.access_token.is_empty() {
-            headers.push(("Authorization".into(), format!("Bearer {}", secrets.access_token)));
-        }
-        if !secrets.access_cookie.is_empty() && secrets.access_token.starts_with("2:") {
-            headers.push(("Cookie".into(), secrets.access_cookie.clone()));
-        }
+        let headers = access_headers(secrets, false);
         match self.post("/v1/logout", &json!({ "api": API_VERSION }), &headers) {
             Ok(_) => Ok(()),
             Err(HttpError::Api(error)) if error.status == 404 || error.status == 405 => {
-                let mut all: Vec<(String, String)> = CLIENT_HEADERS
-                    .iter()
-                    .map(|(name, value)| (name.to_string(), value.to_string()))
-                    .collect();
-                all.extend(headers);
                 send_json(
                     self.fetch.as_ref(),
-                    HttpRequest {
-                        url: format!("{}/v1/sessions", self.base),
-                        method: "DELETE",
-                        headers: all,
-                        body: None,
-                    },
+                    delete_request(format!("{}/v1/sessions", self.base), headers),
                     &mut crate::http::HttpOptions::new(),
                 )
                 .map_err(ApiClientError::from)?;
@@ -442,17 +473,27 @@ impl ApiClient {
         if let Some(token) = cursor_token {
             body.insert("cursor_token".into(), json!(token));
         }
-        let mut headers: Vec<(String, String)> = vec![("Authorization".into(), format!("Bearer {}", secrets.access_token))];
-        if !secrets.access_cookie.is_empty() && secrets.access_token.starts_with("2:") {
-            headers.push(("Cookie".into(), secrets.access_cookie.clone()));
-        }
-        let response = self.post("/v1/items", &Value::Object(body), &headers)?;
+        let response = self.post("/v1/items", &Value::Object(body), &access_headers(secrets, true))?;
         Ok(parse_sync_page(&response.body))
     }
 }
 
 fn is_auth_failure(error: &ApiClientError) -> bool {
     matches!(error, ApiClientError::Api(error) if error.status == 401 || error.status == 498)
+}
+
+/// One copy of the access credentials: the Bearer header, plus the cookie
+/// only for legacy `2:`-prefixed tokens. `bearer_always` is true on the sync
+/// path (TS sends the header unconditionally there) and gated on logout.
+fn access_headers(secrets: &SessionSecrets, bearer_unconditional: bool) -> Vec<(String, String)> {
+    let mut headers = Vec::new();
+    if bearer_unconditional || !secrets.access_token.is_empty() {
+        headers.push(("Authorization".into(), format!("Bearer {}", secrets.access_token)));
+    }
+    if !secrets.access_cookie.is_empty() && secrets.access_token.starts_with("2:") {
+        headers.push(("Cookie".into(), secrets.access_cookie.clone()));
+    }
+    headers
 }
 
 /// Run one authenticated call. Refreshes an expired access token first, and
@@ -500,7 +541,7 @@ pub fn with_access<R>(
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::http::HttpOptions;
+    use crate::http::{HttpRequest, HttpResponse, HttpOptions};
     use std::cell::RefCell;
     use std::rc::Rc;
 

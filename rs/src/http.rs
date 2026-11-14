@@ -238,3 +238,13 @@ pub fn post_request(url: String, headers: Vec<(String, String)>, body: String) -
     all.extend(headers);
     HttpRequest { url, method: "POST", headers: all, body: Some(body) }
 }
+
+/// The logout fallback's DELETE carries the same identity headers as a POST.
+pub fn delete_request(url: String, headers: Vec<(String, String)>) -> HttpRequest {
+    let mut all: Vec<(String, String)> = CLIENT_HEADERS
+        .iter()
+        .map(|(name, value)| (name.to_string(), value.to_string()))
+        .collect();
+    all.extend(headers);
+    HttpRequest { url, method: "DELETE", headers: all, body: None }
+}

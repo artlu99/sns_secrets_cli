@@ -19,7 +19,7 @@ pub struct SyncReport {
     pub pages: usize,
 }
 
-pub const STORED_TYPES: [&str; 3] = ["Note", "SN|ItemsKey", "Tag"];
+pub const STORED_TYPES: [&str; 3] = ["Note", crate::proto004::ITEMS_KEY_TYPE, "Tag"];
 
 /// Notes are what we show. Tags come along read-only (titles, parents, note
 /// links — the CLI never writes them). Items keys stay so later syncs can
@@ -47,7 +47,10 @@ pub fn drop_unstored_types(db: &CacheDb) -> Result<(), DbError> {
 /// Seconds, milliseconds, or microseconds (what the hosted API sends) →
 /// milliseconds.
 pub fn to_unix_ms(value: i64) -> i64 {
-    let value = value as f64;
+    to_unix_ms_f64(value as f64)
+}
+
+fn to_unix_ms_f64(value: f64) -> i64 {
     if value < 1e11 {
         (value * 1000.0).round() as i64
     } else if value < 1e14 {
@@ -58,12 +61,13 @@ pub fn to_unix_ms(value: i64) -> i64 {
 }
 
 /// `updatedAtMs` — the dedicated timestamp field first, then `updated_at` as
-/// number (epoch) or string (RFC 3339, what Date.parse handles in practice).
+/// number (epoch) or string (what Date.parse accepts in practice: RFC 3339,
+/// a space instead of `T`, or a bare date read as UTC midnight).
 pub fn updated_at_ms(item: &EncryptedItem) -> i64 {
     if let Some(stamp) = item.updated_at_timestamp
-        && stamp > 0
+        && stamp > 0.0
     {
-        return to_unix_ms(stamp);
+        return to_unix_ms_f64(stamp);
     }
     match &item.updated_at {
         Some(Value::Number(number)) => {
@@ -73,11 +77,24 @@ pub fn updated_at_ms(item: &EncryptedItem) -> i64 {
             }
             0
         }
-        Some(Value::String(text)) => chrono::DateTime::parse_from_rfc3339(text)
-            .map(|parsed| parsed.timestamp_millis())
-            .unwrap_or(0),
+        Some(Value::String(text)) => parse_datetime_ms(text).unwrap_or(0),
         _ => 0,
     }
+}
+
+fn parse_datetime_ms(text: &str) -> Option<i64> {
+    if let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(text) {
+        return Some(parsed.timestamp_millis());
+    }
+    // Date.parse also accepts a space instead of `T` and bare dates (as UTC
+    // midnight); cover those rather than storing 0 forever.
+    if let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(&text.replacen(' ', "T", 1)) {
+        return Some(parsed.timestamp_millis());
+    }
+    chrono::NaiveDate::parse_from_str(text, "%Y-%m-%d")
+        .ok()
+        .and_then(|date| date.and_hms_opt(0, 0, 0))
+        .map(|midnight| midnight.and_utc().timestamp_millis())
 }
 
 fn title_from_content(content_type: &str, content: &str) -> Option<String> {
@@ -104,9 +121,10 @@ fn tombstone(item: &EncryptedItem) -> ItemRow {
 }
 
 pub fn load_items_keys(db: &CacheDb) -> Result<HashMap<String, String>, DbError> {
-    let mut statement = db.prepare(
-        "SELECT uuid, content FROM items WHERE content_type = 'SN|ItemsKey' AND deleted = 0",
-    )?;
+    let mut statement = db.prepare(&format!(
+        "SELECT uuid, content FROM items WHERE content_type = '{}' AND deleted = 0",
+        crate::proto004::ITEMS_KEY_TYPE
+    ))?;
     let rows = statement
         .query_map([], |row| Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?)))
         .map_err(DbError::from)?
@@ -173,6 +191,9 @@ pub enum SyncError {
     Fetch(ApiClientError),
     Db(DbError),
     User(String),
+    /// A deferred item's ciphertext no longer decrypts — surfaced instead of
+    /// swallowed so the sync token is not advanced past lost data.
+    Decrypt(String),
 }
 
 impl core::fmt::Display for SyncError {
@@ -181,6 +202,7 @@ impl core::fmt::Display for SyncError {
             Self::Fetch(error) => write!(f, "{error}"),
             Self::Db(error) => write!(f, "{error}"),
             Self::User(message) => f.write_str(message),
+            Self::Decrypt(detail) => write!(f, "decryption failed: {detail}"),
         }
     }
 }
@@ -331,9 +353,13 @@ pub fn run_sync(
     if !deferred.is_empty() {
         let mut rows = Vec::new();
         for item in &deferred {
+            // TS lets a decrypt failure on the deferred retry propagate, so
+            // writeSyncState never runs and the item is resent next sync —
+            // swallowing it here would silently lose the note forever.
             match decrypt_one(item, &mut items_keys, master_key.as_deref()) {
                 Ok(Outcome::Row(row)) => rows.push(row),
-                _ => report.skipped += 1,
+                Ok(_) => report.skipped += 1,
+                Err(error) => return Err(SyncError::Decrypt(error.to_string())),
             }
         }
         if !rows.is_empty() {
@@ -402,7 +428,7 @@ mod tests {
                 items_key_id: None,
                 deleted: None,
                 updated_at: None,
-                updated_at_timestamp: Some(1_000),
+                updated_at_timestamp: Some(1_000.0),
             },
             EncryptedItem {
                 uuid: note_id.clone(),
@@ -415,7 +441,7 @@ mod tests {
                 items_key_id: Some(items_key_id.clone()),
                 deleted: None,
                 updated_at: None,
-                updated_at_timestamp: Some(2_000),
+                updated_at_timestamp: Some(2_000.0),
             },
             EncryptedItem {
                 uuid: tag_id.clone(),
@@ -432,7 +458,7 @@ mod tests {
                 items_key_id: Some(items_key_id),
                 deleted: None,
                 updated_at: None,
-                updated_at_timestamp: Some(5_000),
+                updated_at_timestamp: Some(5_000.0),
             },
             EncryptedItem {
                 uuid: uuid(4),
@@ -442,7 +468,7 @@ mod tests {
                 items_key_id: None,
                 deleted: None,
                 updated_at: None,
-                updated_at_timestamp: Some(3_000),
+                updated_at_timestamp: Some(3_000.0),
             },
             EncryptedItem {
                 uuid: uuid(5),
@@ -452,7 +478,7 @@ mod tests {
                 items_key_id: None,
                 deleted: None,
                 updated_at: None,
-                updated_at_timestamp: Some(4_000),
+                updated_at_timestamp: Some(4_000.0),
             },
         ];
         Fixture { master, items, note_id, tag_id }
@@ -762,7 +788,7 @@ mod tests {
             items_key_id: Some(items_key_id.clone()),
             deleted: Some(true),
             updated_at: None,
-            updated_at_timestamp: Some(6_000),
+            updated_at_timestamp: Some(6_000.0),
         };
         let items = vec![
             EncryptedItem {
@@ -773,7 +799,7 @@ mod tests {
                 items_key_id: None,
                 deleted: None,
                 updated_at: None,
-                updated_at_timestamp: Some(1_000),
+                updated_at_timestamp: Some(1_000.0),
             },
             deleted_note,
         ];

@@ -12,6 +12,7 @@ use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
 use chacha20poly1305::aead::{Aead, KeyInit, Nonce, Payload};
 use chacha20poly1305::{Key, XChaCha20Poly1305};
+use serde::Deserialize as _;
 use serde_json::Value;
 use zeroize::Zeroizing;
 
@@ -19,8 +20,54 @@ pub const ITEMS_KEY_TYPE: &str = "SN|ItemsKey";
 const NONCE_BYTES: usize = 24;
 const KEY_BYTES: usize = 32;
 
+/// Lenient `Option<bool>`: the server has sent booleans and 0/1 integers.
+fn deserialize_opt_bool<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Option<bool>, D::Error> {
+    let value = Option::<Value>::deserialize(deserializer)?;
+    match value {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Bool(flag)) => Ok(Some(flag)),
+        Some(Value::Number(ref number)) => number
+            .as_i64()
+            .map(|as_int| Some(as_int != 0))
+            .ok_or_else(|| serde::de::Error::custom("expected a boolean or an integer")),
+        Some(Value::String(text)) => match text.as_str() {
+            "true" => Ok(Some(true)),
+            "false" => Ok(Some(false)),
+            other => {
+                let as_int: i64 = other
+                    .parse()
+                    .map_err(|_| serde::de::Error::custom("expected a boolean or an integer"))?;
+                Ok(Some(as_int != 0))
+            }
+        },
+        Some(_) => Err(serde::de::Error::custom("expected a boolean or an integer")),
+    }
+}
+
+/// Lenient `Option<f64>` — timestamps arrive as integers, floats, or strings;
+/// the fraction is kept so `to_unix_ms` can round like Math.round does.
+fn deserialize_opt_f64<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Option<f64>, D::Error> {
+    let value = Option::<Value>::deserialize(deserializer)?;
+    match value {
+        None | Some(Value::Null) => Ok(None),
+        Some(Value::Number(ref number)) => number
+            .as_f64()
+            .map(Some)
+            .ok_or_else(|| serde::de::Error::custom("expected a number")),
+        Some(Value::String(text)) => text
+            .trim()
+            .parse::<f64>()
+            .map(Some)
+            .map_err(|_| serde::de::Error::custom("expected a number")),
+        Some(_) => Err(serde::de::Error::custom("expected a number")),
+    }
+}
+
 /// The wire shape of a synced item (`src/sn-crypto/004.ts`'s `EncryptedItem`).
-#[derive(Debug, Clone, PartialEq, Eq, serde::Serialize, serde::Deserialize)]
+/// Deserialization is deliberately lenient: a strict parse would silently
+/// drop live notes or tombstones from a sync page while the sync token still
+/// advanced, so every server-side spelling of a field must parse.
+#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct EncryptedItem {
     pub uuid: String,
     pub content_type: String,
@@ -30,13 +77,13 @@ pub struct EncryptedItem {
     pub enc_item_key: Option<String>,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub items_key_id: Option<String>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
+    #[serde(default, deserialize_with = "deserialize_opt_bool", skip_serializing_if = "Option::is_none")]
     pub deleted: Option<bool>,
     /// The server sends an ISO string (or a number); carried as-is.
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub updated_at: Option<Value>,
-    #[serde(default, skip_serializing_if = "Option::is_none")]
-    pub updated_at_timestamp: Option<i64>,
+    #[serde(default, deserialize_with = "deserialize_opt_f64", skip_serializing_if = "Option::is_none")]
+    pub updated_at_timestamp: Option<f64>,
 }
 
 #[derive(Debug, PartialEq, Eq)]
