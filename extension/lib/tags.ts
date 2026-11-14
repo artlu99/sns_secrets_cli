@@ -77,3 +77,31 @@ export function buildTagGraph(rows: ItemRow[]): TagGraph {
   const links = tagLinksFromRows(rows);
   return { links, parentOf: resolveParents(links) };
 }
+
+export type TagRow = { tag: string; depth: number };
+
+/**
+ * The sidebar tree as flat rows (tag + nesting depth), in render order.
+ * Cycle-safe: explicit folders and inferred containment can disagree and
+ * form a parent cycle (platforms → vercel → platforms); without the emitted
+ * set the recursion never terminates — each tag renders exactly once, the
+ * same cut `sns list`'s renderer makes.
+ */
+export function flattenTagTree(graph: TagGraph, forest: ReturnType<typeof tagForest>): TagRow[] {
+  const rows: TagRow[] = [];
+  const emitted = new Set<string>();
+  const byTitle = (a: string, b: string) =>
+    (graph.links.titleOf.get(a) ?? "").localeCompare(graph.links.titleOf.get(b) ?? "") || a.localeCompare(b);
+  const walk = (tag: string, depth: number): void => {
+    if (emitted.has(tag)) return;
+    emitted.add(tag);
+    rows.push({ tag, depth });
+    for (const child of (forest.childrenOf.get(tag) ?? []).slice().sort(byTitle)) {
+      walk(child, depth + 1);
+    }
+  };
+  for (const tag of [...graph.links.titleOf.keys()].filter((t) => forest.isRoot(t)).sort(byTitle)) {
+    walk(tag, 0);
+  }
+  return rows;
+}

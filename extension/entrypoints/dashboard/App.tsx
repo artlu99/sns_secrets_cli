@@ -1,11 +1,26 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
 import { noteBody } from "../../../src/notes.ts";
+import {
+  CheckIcon,
+  CopyIcon,
+  EmptyVaultIcon,
+  EyeIcon,
+  EyeOffIcon,
+  FolderIcon,
+  KeyIcon,
+  LockIcon,
+  NotesIcon,
+  SearchIcon,
+  SyncIcon,
+  TagIcon,
+} from "../../components/icons.tsx";
 import { useAutoLock } from "../../components/auto-lock.ts";
 import { MfaForm, UnlockForm } from "../../components/UnlockForm.tsx";
 import { copySecret } from "../../lib/clipboard.ts";
 import { loadSession, loadSettings, type VaultSession } from "../../lib/session.ts";
 import { lockVault, syncVault, unlockVault } from "../../lib/unlock.ts";
 import { buildVault, type NoteSummary, type VaultView } from "../../lib/vault.ts";
+import { flattenTagTree } from "../../lib/tags.ts";
 
 type Phase = "boot" | "locked" | "working" | "mfa" | "ready";
 type Selection = { kind: "all" } | { kind: "untagged" } | { kind: "tag"; uuid: string };
@@ -84,6 +99,7 @@ export default function App() {
 
   async function submitUnlock(): Promise<void> {
     setError("");
+    setAutoLocked(false);
     setPhase("working");
     setStatus("Deriving keys…");
     try {
@@ -99,7 +115,6 @@ export default function App() {
           }),
       });
       setPassword("");
-      setAutoLocked(false);
       setSession(next);
       await refresh(next);
     } catch (caught) {
@@ -171,29 +186,28 @@ export default function App() {
 
   const notes = notesForSelection(view, selection);
   const needle = query.trim().toLowerCase();
-  const filtered = needle === ""
-    ? notes
-    : notes.filter((note) => note.title.toLowerCase().includes(needle));
+  const filtered = needle === "" ? notes : notes.filter((note) => note.title.toLowerCase().includes(needle));
   const selectedRow = noteUuid ? view.noteRows.get(noteUuid) ?? null : null;
   const scan = selectedRow ? view.scan(selectedRow) : null;
   const keys = selectedRow ? view.keysOf(selectedRow) : [];
   const body = selectedRow ? noteBody(selectedRow).body : "";
 
-  // Every isRoot tag renders top-level — including parent-cycle members, which
-  // the forest hangs as separate chains (same as `sns list` does).
-  const treeRoots = [...view.graph.links.titleOf.keys()]
-    .filter((tag) => view.forest.isRoot(tag))
-    .sort(byTitle);
+  // Cycle-safe flat tree: every isRoot tag renders top-level — including
+  // parent-cycle members, which each hang their chain once (same cut as
+  // `sns list`). Never render the forest recursively: childrenOf carries
+  // both directions of a parent cycle.
+  const tagRows = flattenTagTree(view.graph, view.forest);
 
   return (
     <div className="shell">
       <header className="topbar">
-        <span className="brand compact">sns vault</span>
-        <span className="account" title={`${session.email} · ${session.apiUrl}`}>
-          {session.email}
-        </span>
+        <span className="brand-mark"><KeyIcon size={14} /></span>
+        <span className="brand-name">sns vault</span>
+        {session.email ? (
+          <span className="pill account" title={`${session.email} · ${session.apiUrl}`}>{session.email}</span>
+        ) : null}
         <span className="spacer" />
-        <span className="synced">{syncedAt ? `synced ${view.formatWhen(syncedAt)}` : ""}</span>
+        {syncedAt ? <span className="synced">{view.formatWhen(syncedAt)}</span> : null}
         <button
           className="ghost"
           type="button"
@@ -208,36 +222,59 @@ export default function App() {
               .finally(() => setSyncing(false));
           }}
         >
+          <SyncIcon size={13} className={syncing ? "spin" : undefined} />
           {syncing ? "syncing…" : "sync"}
         </button>
-        <button className="ghost" type="button" onClick={() => void lock()}>lock</button>
+        <button className="icon-btn" type="button" title="Lock now" onClick={() => void lock()}>
+          <LockIcon size={15} />
+        </button>
       </header>
 
       <div className="columns">
         <nav className="sidebar">
+          <p className="section-label">Vault</p>
           <button
             className={`tree-row ${selection.kind === "all" ? "active" : ""}`}
             type="button"
-            onClick={() => { setSelection({ kind: "all" }); }}
+            onClick={() => {
+              setSelection({ kind: "all" });
+              setNoteUuid(null);
+            }}
           >
+            <NotesIcon size={14} className="tree-icon" />
             <span>All notes</span>
             <span className="count">{view.notes.length}</span>
           </button>
-          {treeRoots.map((tag) => (
-            <TagNode
-              key={tag}
-              tag={tag}
-              view={view}
-              selection={selection}
-              onSelect={(uuid) => { setSelection({ kind: "tag", uuid }); setNoteUuid(null); }}
-            />
-          ))}
+          {tagRows.map(({ tag, depth }) => {
+            const active = selection.kind === "tag" && selection.uuid === tag;
+            const count = view.notesInTag(tag).size;
+            return (
+              <button
+                key={tag}
+                className={`tree-row ${active ? "active" : ""}`}
+                type="button"
+                style={{ paddingLeft: `${10 + depth * 14}px` }}
+                onClick={() => {
+                  setSelection({ kind: "tag", uuid: tag });
+                  setNoteUuid(null);
+                }}
+              >
+                <TagIcon size={14} className="tree-icon" />
+                <span className="tag-name">{view.graph.links.titleOf.get(tag) ?? tag}</span>
+                <span className="count">{count}</span>
+              </button>
+            );
+          })}
           {view.untagged.size > 0 ? (
             <button
               className={`tree-row ${selection.kind === "untagged" ? "active" : ""}`}
               type="button"
-              onClick={() => { setSelection({ kind: "untagged" }); setNoteUuid(null); }}
+              onClick={() => {
+                setSelection({ kind: "untagged" });
+                setNoteUuid(null);
+              }}
             >
+              <FolderIcon size={14} className="tree-icon" />
               <span>(untagged)</span>
               <span className="count">{view.untagged.size}</span>
             </button>
@@ -245,14 +282,16 @@ export default function App() {
         </nav>
 
         <section className="note-list">
-          <input
-            className="search"
-            type="search"
-            placeholder="Filter by title"
-            value={query}
-            onChange={(event) => setQuery(event.target.value)}
-            spellCheck={false}
-          />
+          <div className="search-wrap">
+            <SearchIcon size={13} className="search-icon" />
+            <input
+              type="search"
+              placeholder="Filter by title"
+              value={query}
+              onChange={(event) => setQuery(event.target.value)}
+              spellCheck={false}
+            />
+          </div>
           <ul>
             {filtered.map((note) => (
               <li key={note.uuid}>
@@ -263,22 +302,33 @@ export default function App() {
                 >
                   <span className="note-title">{note.title}</span>
                   <span className="note-meta">
-                    {note.settings > 0 ? <span className="pill">{note.settings} keys</span> : null}
+                    {note.settings > 0 ? (
+                      <span className="pill">{note.settings} {note.settings === 1 ? "key" : "keys"}</span>
+                    ) : null}
                     <span className="when">{view.formatWhen(note.updatedAt)}</span>
                   </span>
                 </button>
               </li>
             ))}
-            {filtered.length === 0 ? <li className="hint padded">No notes here.</li> : null}
+            {filtered.length === 0 ? (
+              <div className="empty"><SearchIcon size={18} /><p>No notes here.</p></div>
+            ) : null}
           </ul>
         </section>
 
         <section className="detail">
           {selectedRow && scan ? (
             <>
-              <h2 className="detail-title">{selectedRow.title ?? "(untitled)"}</h2>
+              <div className="detail-head">
+                <h2 className="detail-title">{selectedRow.title ?? "(untitled)"}</h2>
+                <div className="detail-meta">
+                  {keys.length > 0 ? <span className="pill">{keys.length} keys</span> : null}
+                  <span className="when">{view.formatWhen(selectedRow.updated_at)}</span>
+                </div>
+              </div>
               {view.displayProse(scan).trim() !== "" ? (
                 <section className="prose">
+                  <p className="section-label">Prose</p>
                   <pre>{view.displayProse(scan)}</pre>
                 </section>
               ) : null}
@@ -288,6 +338,7 @@ export default function App() {
                     {keys.map((entry) => {
                       const id = `${selectedRow.uuid}:${entry.key}`;
                       const shown = revealed.has(id);
+                      const copiedThis = copied?.label === id;
                       return (
                         <tr key={entry.key}>
                           <td className="key-name">{entry.key}</td>
@@ -300,19 +351,27 @@ export default function App() {
                           </td>
                           <td className="key-comment">{entry.comment ?? ""}</td>
                           <td className="key-actions">
-                            <button className="ghost" type="button" onClick={() => toggleReveal(id)}>
-                              {shown ? "hide" : "show"}
+                            <button
+                              className="icon-btn"
+                              type="button"
+                              title={shown ? "Hide value" : "Reveal value"}
+                              onClick={() => toggleReveal(id)}
+                            >
+                              {shown ? <EyeOffIcon size={15} /> : <EyeIcon size={15} />}
                             </button>
                             <button
-                              className="ghost"
+                              className={`icon-btn ${copiedThis ? (copied.scheduled ? "ok" : "warn") : ""}`}
                               type="button"
+                              title={
+                                copiedThis
+                                  ? copied.scheduled
+                                    ? "Copied — blanks in 30s"
+                                    : "Copied — clear NOT scheduled"
+                                  : "Copy value"
+                              }
                               onClick={() => copy(`${selectedRow.uuid}:${entry.key}`, entry.value)}
                             >
-                              {copied?.label === `${selectedRow.uuid}:${entry.key}`
-                                ? copied.scheduled
-                                  ? "copied ✓ blanks in 30s"
-                                  : "copied ✓ — clear NOT scheduled"
-                                : "copy"}
+                              {copiedThis ? <CheckIcon size={15} /> : <CopyIcon size={15} />}
                             </button>
                           </td>
                         </tr>
@@ -321,20 +380,23 @@ export default function App() {
                   </tbody>
                 </table>
               ) : (
-                <p className="hint">No KEY=VALUE settings in this note.</p>
+                <div className="empty">
+                  <EmptyVaultIcon size={22} />
+                  <p>No KEY=VALUE settings in this note.</p>
+                </div>
               )}
               <div className="detail-actions">
                 <button className="ghost" type="button" onClick={() => copy(`${selectedRow.uuid}:body`, body)}>
-                  {copied?.label === `${selectedRow.uuid}:body`
-                    ? copied.scheduled
-                      ? "copied ✓ blanks in 30s"
-                      : "copied ✓ — clear NOT scheduled"
-                    : "copy whole body"}
+                  {copied?.label === `${selectedRow.uuid}:body` ? <CheckIcon size={13} /> : <CopyIcon size={13} />}
+                  {copied?.label === `${selectedRow.uuid}:body` ? "copied" : "copy whole body"}
                 </button>
               </div>
             </>
           ) : (
-            <p className="hint padded">Select a note to see its keys.</p>
+            <div className="empty tall">
+              <EmptyVaultIcon size={28} />
+              <p>Select a note to see its keys.</p>
+            </div>
           )}
         </section>
       </div>
@@ -343,41 +405,11 @@ export default function App() {
   );
 }
 
-function TagNode(props: {
-  tag: string;
-  view: VaultView;
-  selection: Selection;
-  onSelect: (uuid: string) => void;
-}): ReactNode {
-  const { view, tag } = props;
-  const children = (view.forest.childrenOf.get(tag) ?? []).sort(byTitle);
-  const active = props.selection.kind === "tag" && props.selection.uuid === tag;
-  const count = view.notesInTag(tag).size;
-  return (
-    <>
-      <button
-        className={`tree-row ${active ? "active" : ""}`}
-        type="button"
-        style={{ paddingLeft: `${8 + (view.forest.depthOf.get(tag) ?? 0) * 14}px` }}
-        onClick={() => props.onSelect(tag)}
-      >
-        <span className="tag-name">{view.graph.links.titleOf.get(tag) ?? tag}</span>
-        <span className="count">{count}</span>
-      </button>
-      {children.map((child) => (
-        <TagNode key={child} tag={child} view={view} selection={props.selection} onSelect={props.onSelect} />
-      ))}
-    </>
-  );
-}
-
 /** Notes under the current sidebar selection, newest first. */
 function notesForSelection(view: VaultView, selection: Selection): NoteSummary[] {
   const newestFirst = (a: NoteSummary, b: NoteSummary) =>
     b.updatedAt - a.updatedAt || a.uuid.localeCompare(b.uuid);
   if (selection.kind === "all") return view.notes;
-  const uuids = selection.kind === "untagged"
-    ? view.untagged
-    : view.notesInTag(selection.uuid);
+  const uuids = selection.kind === "untagged" ? view.untagged : view.notesInTag(selection.uuid);
   return view.notes.filter((note) => uuids.has(note.uuid)).sort(newestFirst);
 }

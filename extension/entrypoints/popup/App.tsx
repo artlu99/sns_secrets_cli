@@ -1,5 +1,14 @@
 import { useEffect, useRef, useState } from "react";
 import { browser } from "wxt/browser";
+import {
+  CheckIcon,
+  CopyIcon,
+  EmptyVaultIcon,
+  ExternalIcon,
+  KeyIcon,
+  LockIcon,
+  SearchIcon,
+} from "../../components/icons.tsx";
 import { useAutoLock } from "../../components/auto-lock.ts";
 import { MfaForm, UnlockForm } from "../../components/UnlockForm.tsx";
 import { copySecret } from "../../lib/clipboard.ts";
@@ -73,6 +82,7 @@ export default function App() {
 
   async function submitUnlock(): Promise<void> {
     setError("");
+    setAutoLocked(false);
     setPhase("working");
     setStatus("Deriving keys…");
     try {
@@ -88,7 +98,6 @@ export default function App() {
           }),
       });
       setPassword("");
-      setAutoLocked(false);
       setSession(next);
       await refresh(next);
     } catch (caught) {
@@ -128,7 +137,7 @@ export default function App() {
     window.close();
   }
 
-  if (phase === "boot") return <p className="hint">Loading…</p>;
+  if (phase === "boot") return <p className="hint padded">Loading…</p>;
 
   if (phase === "locked" || phase === "working") {
     return (
@@ -175,40 +184,59 @@ export default function App() {
   return (
     <main className="popup">
       <header className="bar">
-        <span className="account" title={session?.email}>{session?.email}</span>
-        <button className="linkish" type="button" onClick={() => openDashboard()}>dashboard</button>
-        <button className="linkish" type="button" onClick={() => void lock()}>lock</button>
+        <span className="brand-mark"><KeyIcon size={14} /></span>
+        <span className="brand-name">sns vault</span>
+        <span className="spacer" />
+        <button className="icon-btn" type="button" title="Open dashboard" onClick={() => openDashboard()}>
+          <ExternalIcon size={15} />
+        </button>
+        <button className="icon-btn" type="button" title="Lock now" onClick={() => void lock()}>
+          <LockIcon size={15} />
+        </button>
       </header>
-      <input
-        className="search"
-        type="search"
-        placeholder="Search keys — type to copy"
-        autoFocus
-        value={query}
-        onChange={(event) => setQuery(event.target.value)}
-        spellCheck={false}
-      />
+
+      <div className="search-wrap">
+        <SearchIcon size={14} className="search-icon" />
+        <input
+          className="search"
+          type="search"
+          placeholder="Search keys…"
+          autoFocus
+          value={query}
+          onChange={(event) => setQuery(event.target.value)}
+          spellCheck={false}
+        />
+      </div>
+
       <ul className="hits">
-        {keyHits.map((hit) => (
-          <li key={`${hit.noteUuid}:${hit.key}`}>
-            <button
-              className="hit"
-              type="button"
-              onClick={() => copyValue(hit)}
-              title={`${hit.noteTitle} — ${hit.key}`}
-            >
-              <span className="hit-key">{hit.key}</span>
-              <span className="hit-note">{hit.noteTitle}</span>
-              <span className="hit-action">
-                {copied === `${hit.noteUuid}:${hit.key}:30s`
-                  ? "copied ✓ blanks in 30s"
-                  : copied === `${hit.noteUuid}:${hit.key}:!30s`
-                    ? "copied ✓ — clear NOT scheduled"
-                    : "copy"}
-              </span>
-            </button>
-          </li>
-        ))}
+        {keyHits.map((hit) => {
+          const hitId = `${hit.noteUuid}:${hit.key}`;
+          const copiedThis = copied === `${hitId}:30s`;
+          const failedThis = copied === `${hitId}:!30s`;
+          return (
+            <li key={hitId}>
+              <button
+                className={`hit ${copied !== null && copied.startsWith(hitId) ? "hit-active" : ""}`}
+                type="button"
+                onClick={() => copyValue(hit)}
+                title={`${hit.noteTitle} — ${hit.key}`}
+              >
+                <span className="hit-key">{hit.key}</span>
+                <span className="hit-note">{hit.noteTitle}</span>
+                <span className={`hit-action ${copiedThis ? "ok" : ""} ${failedThis ? "warn" : ""}`}>
+                  {copiedThis || failedThis ? (
+                    <>
+                      {copiedThis ? <CheckIcon size={13} /> : null}
+                      {copiedThis ? "blanks in 30s" : "clear NOT scheduled"}
+                    </>
+                  ) : (
+                    <CopyIcon size={13} />
+                  )}
+                </span>
+              </button>
+            </li>
+          );
+        })}
         {noteHits.map((note) => (
           <li key={note.uuid}>
             <button className="hit note-hit" type="button" onClick={() => openDashboard(note.uuid)}>
@@ -219,9 +247,9 @@ export default function App() {
         ))}
       </ul>
       {needle !== "" && keyHits.length === 0 && noteHits.length === 0 ? (
-        <p className="hint">No key or note matches.</p>
+        <div className="empty"><SearchIcon size={18} /><p>No key or note matches.</p></div>
       ) : null}
-      {needle === "" ? <p className="hint">{view ? `${view.notes.length} notes synced. Type to search.` : ""}</p> : null}
+      {needle === "" ? <p className="hint footer-hint">{view ? `${view.notes.length} notes synced — type to search` : ""}</p> : null}
     </main>
   );
 }

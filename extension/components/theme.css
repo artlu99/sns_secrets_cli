@@ -1,0 +1,240 @@
+/**
+ * Design tokens, reset, and shared primitives. Entry stylesheets
+ * (popup.css / dashboard.css) import this first and keep only layout.
+ * Fonts: Inter Variable (UI) + JetBrains Mono Variable (values) — bundled,
+ * never fetched from a CDN (MV3 CSP / no remote code).
+ */
+
+:root {
+  color-scheme: dark;
+  --bg: #0b0d11;
+  --surface: #10131a;
+  --surface-2: #151923;
+  --surface-3: #1b202c;
+  --line: rgba(148, 163, 190, 0.1);
+  --line-strong: rgba(148, 163, 190, 0.2);
+  --text: #e7eaf0;
+  --text-2: #a7aec0;
+  --dim: #767e91;
+  --accent: #6ea1ff;
+  --accent-strong: #4b86ff;
+  --accent-soft: rgba(96, 148, 255, 0.14);
+  --ok: #3ecf8e;
+  --err: #f47174;
+  --font-sans: "Inter Variable", system-ui, -apple-system, "Segoe UI", sans-serif;
+  --font-mono: "JetBrains Mono Variable", ui-monospace, "Cascadia Mono", monospace;
+  --r-s: 7px;
+  --r-m: 9px;
+  --r-l: 12px;
+  --speed: 0.13s;
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  background: var(--bg);
+  color: var(--text);
+  font-family: var(--font-sans);
+  font-size: 13px;
+  line-height: 1.5;
+  -webkit-font-smoothing: antialiased;
+  text-rendering: optimizeLegibility;
+}
+
+::selection {
+  background: rgba(110, 161, 255, 0.28);
+}
+
+:focus-visible {
+  outline: 2px solid var(--accent);
+  outline-offset: 1px;
+  border-radius: 4px;
+}
+
+::-webkit-scrollbar {
+  width: 10px;
+  height: 10px;
+}
+::-webkit-scrollbar-thumb {
+  background: var(--surface-3);
+  border-radius: 6px;
+  border: 2px solid var(--bg);
+}
+::-webkit-scrollbar-thumb:hover {
+  background: var(--line-strong);
+}
+::-webkit-scrollbar-track {
+  background: transparent;
+}
+
+h1,
+h2,
+h3,
+p {
+  margin: 0;
+}
+
+input,
+button {
+  font: inherit;
+  color: inherit;
+}
+
+input {
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: var(--r-m);
+  color: var(--text);
+  padding: 7px 10px;
+  outline: none;
+  transition:
+    border-color var(--speed) ease,
+    background var(--speed) ease,
+    box-shadow var(--speed) ease;
+}
+input:hover {
+  border-color: var(--line-strong);
+}
+input:focus {
+  border-color: var(--accent);
+  background: var(--surface-3);
+  box-shadow: 0 0 0 3px var(--accent-soft);
+}
+input::placeholder {
+  color: var(--dim);
+}
+
+button {
+  cursor: pointer;
+}
+
+.primary {
+  background: linear-gradient(180deg, var(--accent), var(--accent-strong));
+  border: none;
+  border-radius: var(--r-m);
+  color: #fff;
+  padding: 8px 12px;
+  font-weight: 600;
+  letter-spacing: 0.01em;
+  transition:
+    filter var(--speed) ease,
+    transform 0.05s ease,
+    box-shadow var(--speed) ease;
+}
+.primary:hover:not(:disabled) {
+  filter: brightness(1.08);
+  box-shadow: 0 4px 14px rgba(75, 134, 255, 0.3);
+}
+.primary:active:not(:disabled) {
+  transform: translateY(0.5px);
+  filter: brightness(0.97);
+}
+.primary:disabled {
+  opacity: 0.55;
+  cursor: default;
+}
+
+.ghost {
+  display: inline-flex;
+  align-items: center;
+  gap: 6px;
+  background: transparent;
+  border: 1px solid var(--line);
+  border-radius: var(--r-m);
+  color: var(--text-2);
+  padding: 5px 10px;
+  font-size: 12px;
+  transition:
+    color var(--speed) ease,
+    background var(--speed) ease,
+    border-color var(--speed) ease;
+}
+.ghost:hover:not(:disabled) {
+  color: var(--text);
+  background: var(--surface-2);
+  border-color: var(--line-strong);
+}
+.ghost:disabled {
+  opacity: 0.5;
+  cursor: default;
+}
+
+.icon-btn {
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  width: 28px;
+  height: 28px;
+  padding: 0;
+  background: transparent;
+  border: none;
+  border-radius: var(--r-s);
+  color: var(--dim);
+  transition:
+    color var(--speed) ease,
+    background var(--speed) ease;
+}
+.icon-btn:hover {
+  color: var(--text);
+  background: var(--surface-3);
+}
+.icon-btn.ok,
+.icon-btn.ok:hover {
+  color: var(--ok);
+  background: transparent;
+}
+
+.linkish {
+  border: none;
+  background: none;
+  color: var(--accent);
+  font: inherit;
+  font-size: 12px;
+  cursor: pointer;
+  padding: 2px 4px;
+  border-radius: 4px;
+}
+.linkish:hover {
+  text-decoration: underline;
+}
+
+.mono {
+  font-family: var(--font-mono);
+}
+
+.notice {
+  color: var(--ok);
+  margin: 4px 0;
+}
+.error {
+  color: var(--err);
+  margin: 4px 0;
+  white-space: pre-wrap;
+}
+.hint {
+  color: var(--dim);
+}
+.pill {
+  display: inline-flex;
+  align-items: center;
+  gap: 4px;
+  background: var(--surface-2);
+  border: 1px solid var(--line);
+  border-radius: 999px;
+  color: var(--text-2);
+  font-size: 11px;
+  padding: 1px 8px;
+  white-space: nowrap;
+}
+
+.spin {
+  animation: sns-rotate 0.8s linear infinite;
+}
+@keyframes sns-rotate {
+  to {
+    transform: rotate(360deg);
+  }
+}

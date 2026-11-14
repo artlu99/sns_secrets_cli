@@ -1,5 +1,5 @@
 import { describe, expect, test } from "bun:test";
-import { buildTagGraph, taggedNoteUuids } from "./tags.ts";
+import { buildTagGraph, flattenTagTree, tagForest, taggedNoteUuids } from "./tags.ts";
 import { buildVault } from "./vault.ts";
 import type { ItemRow } from "./store.ts";
 
@@ -74,6 +74,35 @@ describe("tag graph", () => {
     ];
     const graph = buildTagGraph(rows);
     expect(graph.links.tagToNotes.get("tag-1")?.size).toBe(1);
+  });
+
+  test("a parent cycle (explicit + inferred disagree) flattens with every tag exactly once", () => {
+    // Platforms explicitly names Vercel as its folder; inference nests Vercel
+    // under Platforms (its notes are a subset). parentOf: platforms→vercel and
+    // vercel→platforms — a cycle. The CLI cuts it with an emitted set; the
+    // extension's flatten must too (a naive recursion OOM'd the browser).
+    const rows = [
+      // Platforms' content names Vercel as a PARENT tag.
+      {
+        uuid: "tag-platforms",
+        content_type: "Tag",
+        updated_at: 1,
+        deleted: 0,
+        title: "Platforms",
+        content: JSON.stringify({ title: "Platforms", references: [
+          { uuid: "tag-vercel", content_type: "Tag" },
+          { uuid: "n1", content_type: "Note" },
+        ] }),
+      },
+      tagRow("tag-vercel", "Vercel", null, ["n1"]),
+      noteRow("n1", "A=1", ["tag-platforms", "tag-vercel"]),
+    ];
+    const graph = buildTagGraph(rows);
+    const rows1 = flattenTagTree(graph, tagForest(graph.parentOf));
+    expect(rows1.map((row) => row.tag).sort()).toEqual(["tag-platforms", "tag-vercel"]);
+    // stable across repeated calls (no shared mutable state)
+    const rows2 = flattenTagTree(graph, tagForest(graph.parentOf));
+    expect(rows2).toEqual(rows1);
   });
 });
 

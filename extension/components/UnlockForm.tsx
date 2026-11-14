@@ -1,4 +1,5 @@
 import { useState } from "react";
+import { KeyIcon } from "./icons.tsx";
 
 export type UnlockFormProps = {
   email: string;
@@ -21,7 +22,10 @@ export function UnlockForm(props: UnlockFormProps) {
   const [showServer, setShowServer] = useState(false);
   return (
     <form className="unlock" onSubmit={(event) => { event.preventDefault(); props.onSubmit(); }}>
-      <h1 className={props.compact ? "brand compact" : "brand"}>sns vault</h1>
+      <h1 className={props.compact ? "brand compact" : "brand"}>
+        <span className="brand-mark"><KeyIcon size={14} /></span>
+        sns vault
+      </h1>
       <p className="sub">Signs in to Standard Notes. Your password never leaves this window —
         key derivation and decryption happen here.</p>
       <label>
