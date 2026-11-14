@@ -12,7 +12,7 @@ use rusqlite::{params, Connection, ErrorCode, Error as SqliteError, OptionalExte
 use std::path::Path;
 
 pub struct CacheDb {
-    conn: Connection,
+    pub(crate) conn: Connection,
 }
 
 impl core::fmt::Debug for CacheDb {
@@ -187,6 +187,16 @@ CREATE TABLE IF NOT EXISTS sync_state (
 impl CacheDb {
     /// TS `db.close()` — drop the connection, releasing the file lock.
     pub fn close(self) {}
+
+    /// `db.exec` / `db.run` — one statement or batch, no rows.
+    pub fn conn_execute(&self, sql: &str) -> Result<(), DbError> {
+        self.conn.execute_batch(sql).map_err(DbError::from)
+    }
+
+    /// Prepared-statement access for cross-module queries.
+    pub(crate) fn prepare(&self, sql: &str) -> Result<rusqlite::Statement<'_>, DbError> {
+        self.conn.prepare(sql).map_err(DbError::from)
+    }
 
     /// `sqliteMasterCount` — also the wrong-key detector on open.
     pub fn sqlite_master_count(&self) -> Result<i64, DbError> {

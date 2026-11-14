@@ -11,3 +11,4 @@ pub mod kdf;
 pub mod proto004;
 pub mod session;
 pub mod sn_api;
+pub mod sync_engine;
