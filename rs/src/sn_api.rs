@@ -675,6 +675,94 @@ mod tests {
         assert_eq!(empty.conflicts, 0);
     }
 
+    /// The server has been seen to send `deleted` as 0/1 and timestamps as
+    /// strings; a strict deserializer would silently drop such items from a
+    /// sync page while the sync token still advanced — losing notes.
+    #[test]
+    fn sync_page_tolerates_server_side_field_spellings() {
+        let body = json!({
+            "data": {
+                "retrieved_items": [
+                    { "uuid": "n1", "content_type": "Note", "updated_at_timestamp": "1700000000123" },
+                    { "uuid": "n2", "content_type": "Note", "deleted": 1 },
+                    { "uuid": "n3", "content_type": "Note", "deleted": "0", "updated_at": 1700000000.5 }
+                ]
+            }
+        });
+        let page = parse_sync_page(&body);
+        assert_eq!(page.items.len(), 3, "every server spelling parses");
+        assert_eq!(page.items[0].updated_at_timestamp, Some(1_700_000_000_123.0));
+        assert_eq!(page.items[1].deleted, Some(true));
+        assert_eq!(page.items[2].deleted, Some(false));
+        assert_eq!(page.items[2].updated_at, Some(json!(1700000000.5)));
+    }
+
+    #[test]
+    fn absurd_kdf_numbers_fall_back_to_defaults_instead_of_wedging() {
+        let body = json!({
+            "data": {
+                "version": "004", "identifier": "a@b.c", "pw_nonce": "aa",
+                "kdf_iterations": "inf", "kdf_memory": 5e9, "kdf_parallelism": -3
+            }
+        });
+        let params = parse_key_params(&body).expect("parses");
+        assert_eq!(params.iterations, None, "inf must fall back to the default, not u32::MAX");
+        assert_eq!(params.parallelism, None);
+        // 5e9 iterations (finite but huge) is also out of the sane u32 range.
+        let huge = parse_key_params(&json!({
+            "data": { "version": "004", "identifier": "a@b.c", "pw_nonce": "aa", "kdf_iterations": 5e9 }
+        }))
+        .expect("parses");
+        assert_eq!(huge.iterations, None);
+    }
+
+    #[test]
+    fn null_primary_fields_fall_through_to_their_aliases() {
+        let body = json!({
+            "data": { "version": "004", "identifier": "a@b.c", "pw_nonce": null, "pwNonce": "aa" }
+        });
+        let params = parse_key_params(&body).expect("null pw_nonce falls through to pwNonce");
+        assert_eq!(params.pw_nonce, "aa");
+
+        // A null expiration under the primary name must not zero the value.
+        let body = json!({
+            "data": { "session": {
+                "access_token": "a", "refresh_token": "r",
+                "access_expiration": null, "access_token_expiration": 1800
+            } }
+        });
+        let secrets = parse_session_body(&body, &[], "cd").expect("parses");
+        assert_eq!(secrets.access_expiration_ms, 1_800_000);
+    }
+
+    #[test]
+    fn a_non_string_mfa_key_is_no_challenge() {
+        let body = json!({ "error": { "tag": "mfa-required", "payload": { "mfa_key": 12345 } } });
+        assert_eq!(mfa_challenge(&body), None, "TS requires typeof mfa_key === string");
+        let null_payload = json!({ "data": { "error": { "tag": "mfa-required" } } });
+        assert_eq!(mfa_challenge(&null_payload), None);
+    }
+
+    #[test]
+    fn secrets_debug_never_prints_tokens() {
+        let secrets = SessionSecrets {
+            account_email: "me@example.test".into(),
+            refresh_token: "refresh-secret".into(),
+            access_token: "access-secret".into(),
+            access_expiration_ms: 1,
+            refresh_expiration_ms: 2,
+            access_cookie: "access_token=a".into(),
+            refresh_cookie: "refresh_token=r".into(),
+            db_key: "cd".repeat(32),
+        };
+        let debug = format!("{secrets:?}");
+        assert!(debug.contains("me@example.test"), "the email is not secret");
+        for secret in ["refresh-secret", "access-secret", "access_token=a", "refresh_token=r", &"cd".repeat(32)] {
+            assert!(!debug.contains(secret), "{secret:?} leaked into Debug");
+        }
+        assert!(debug.contains("[redacted]"));
+    }
+
     #[test]
     fn cookie_pair_takes_the_first_matching_pair() {
         let cookies = vec![

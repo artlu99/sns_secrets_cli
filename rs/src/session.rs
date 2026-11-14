@@ -389,4 +389,31 @@ mod tests {
         assert_eq!(decrypt_value(&parsed.fields[0].1, &private, "SN_ACCESS_TOKEN").expect("decrypts").as_str(), "x");
         assert_eq!(parse_session_file("no equals sign"), Err(SessionError::MalformedRecord));
     }
+
+    #[test]
+    fn duplicate_keys_resolve_last_wins_like_dotenvx() {
+        let (private, public) = generate_keypair();
+        let first = encrypt_value("stale", &public, "SN_ACCESS_TOKEN").expect("encrypts");
+        let second = encrypt_value("fresh", &public, "SN_ACCESS_TOKEN").expect("encrypts");
+        let file = format!("{PUBLIC_KEY_FIELD}={}\nSN_ACCESS_TOKEN={first}\nSN_ACCESS_TOKEN={second}\n", public.to_base64());
+        let parsed = parse_session_file(&file).expect("parses");
+        assert_eq!(parsed.fields.len(), 1, "one field, last value wins");
+        assert_eq!(
+            decrypt_value(&parsed.fields[0].1, &private, "SN_ACCESS_TOKEN").expect("decrypts").as_str(),
+            "fresh"
+        );
+    }
+
+    #[test]
+    fn an_invalid_scalar_is_a_typed_error_not_a_panic() {
+        // The zero scalar parses as hex but is not a valid P-256 key; a
+        // corrupted .env.keys must produce an error, not a crash.
+        let error = SessionPrivateKey::from_hex(&"00".repeat(32)).expect_err("zero scalar refuses");
+        assert_eq!(error, SessionError::InvalidPrivateKey);
+        assert_eq!(
+            SessionPrivateKey::from_hex(&"ff".repeat(32)).map(|key| key.public_key().to_base64()),
+            Err(SessionError::InvalidPrivateKey),
+            "any scalar at or above the curve order refuses"
+        );
+    }
 }

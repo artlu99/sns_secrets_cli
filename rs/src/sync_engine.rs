@@ -517,6 +517,30 @@ mod tests {
             updated_at_timestamp: None,
         };
         assert_eq!(updated_at_ms(&iso), 1_704_164_645_678);
+        // Date.parse also accepts a space instead of `T`, and bare dates as
+        // UTC midnight.
+        let spaced = EncryptedItem {
+            uuid: "u".into(),
+            content_type: "Note".into(),
+            content: None,
+            enc_item_key: None,
+            items_key_id: None,
+            deleted: None,
+            updated_at: Some(json!("2024-01-02 03:04:05.678Z")),
+            updated_at_timestamp: None,
+        };
+        assert_eq!(updated_at_ms(&spaced), 1_704_164_645_678);
+        let date_only = EncryptedItem {
+            uuid: "u".into(),
+            content_type: "Note".into(),
+            content: None,
+            enc_item_key: None,
+            items_key_id: None,
+            deleted: None,
+            updated_at: Some(json!("2024-01-02")),
+            updated_at_timestamp: None,
+        };
+        assert_eq!(updated_at_ms(&date_only), 1_704_153_600_000);
         let epoch = EncryptedItem {
             uuid: "u".into(),
             content_type: "Note".into(),
@@ -831,4 +855,83 @@ mod tests {
         db.close();
         crate::db::remove_cache_files(&path);
     }
+
+    /// A note deferred past its items key whose ciphertext then fails to
+    /// decrypt must abort the sync BEFORE the token is written — the TS spec
+    /// lets the error propagate so the item is resent next sync, and
+    /// swallowing it would lose the note forever.
+    #[test]
+    fn a_corrupt_deferred_note_aborts_before_the_token_is_written() {
+        let (db, path) = fresh_db("deferred");
+        let master = random_hex();
+        let real_items_key = random_hex();
+        let other_key = random_hex();
+        let items_key_id = uuid(1);
+        let note_id = uuid(2);
+
+        // The note's item key unwraps fine once the real items key loads —
+        // but the content is sealed with a third key nobody provides, so the
+        // deferred retry fails for real.
+        let third_key = random_hex();
+        let note = EncryptedItem {
+            uuid: note_id.clone(),
+            content_type: "Note".into(),
+            enc_item_key: Some(encrypt004(&other_key, &real_items_key, &json!({ "u": note_id, "v": "004" })).expect("seals")),
+            content: Some(encrypt004("{}", &third_key, &json!({ "u": note_id, "v": "004" })).expect("seals")),
+            items_key_id: Some(items_key_id.clone()),
+            deleted: None,
+            updated_at: None,
+            updated_at_timestamp: Some(1000.0),
+        };
+        let wrapping_key = random_hex();
+        let key_aad = json!({ "u": items_key_id, "v": "004" });
+        let items_key_item = EncryptedItem {
+            uuid: items_key_id.clone(),
+            content_type: "SN|ItemsKey".into(),
+            enc_item_key: Some(encrypt004(&wrapping_key, &master, &key_aad).expect("seals")),
+            content: Some(
+                encrypt004(
+                    &json!({ "itemsKey": real_items_key, "version": "004" }).to_string(),
+                    &wrapping_key,
+                    &key_aad,
+                )
+                .expect("seals"),
+            ),
+            items_key_id: None,
+            deleted: None,
+            updated_at: None,
+            updated_at_timestamp: Some(2000.0),
+        };
+
+        let pages: Rc<RefCell<Vec<SyncPage>>> = Rc::new(RefCell::new(vec![
+            SyncPage { items: vec![note], sync_token: Some("sync-1".into()), cursor_token: Some("more".into()), conflicts: 0 },
+            SyncPage { items: vec![items_key_item], sync_token: Some("sync-2".into()), cursor_token: None, conflicts: 0 },
+        ]));
+        let pages_seen = pages.clone();
+        let mut fetch_page = move |_: Option<&str>, _: Option<&str>| {
+            let mut queue = pages_seen.borrow_mut();
+            if queue.is_empty() {
+                return Err(ApiClientError::User("no more pages".into()));
+            }
+            Ok(queue.remove(0))
+        };
+        let master_for_ensure = master.clone();
+        let mut ensure = move || Ok(master_for_ensure.clone());
+        let error = run_sync(
+            SyncOptions { db: &db, master_key: None, now_ms: 1 },
+            &mut fetch_page,
+            &mut ensure,
+        )
+        .expect_err("the corrupt deferred note aborts the sync");
+        assert!(
+            matches!(error, SyncError::Decrypt(_)),
+            "got: {error:?}"
+        );
+        assert_eq!(row_count(&db, "SELECT count(*) FROM items"), 1, "only the items key committed");
+        let state = db.read_sync_state().expect("state readable");
+        assert_eq!(state.sync_token, None, "the token was NOT advanced past lost data");
+        db.close();
+        crate::db::remove_cache_files(&path);
+    }
 }
+// (tests continue in the module above — appended helper test lives in mod tests)
