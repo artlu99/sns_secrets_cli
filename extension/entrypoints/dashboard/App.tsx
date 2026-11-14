@@ -1,5 +1,4 @@
 import { useEffect, useRef, useState, type ReactNode } from "react";
-import { noteBody } from "../../../src/notes.ts";
 import {
   CheckIcon,
   CopyIcon,
@@ -190,7 +189,6 @@ export default function App() {
   const selectedRow = noteUuid ? view.noteRows.get(noteUuid) ?? null : null;
   const scan = selectedRow ? view.scan(selectedRow) : null;
   const keys = selectedRow ? view.keysOf(selectedRow) : [];
-  const body = selectedRow ? noteBody(selectedRow).body : "";
 
   // Cycle-safe flat tree: every isRoot tag renders top-level — including
   // parent-cycle members, which each hang their chain once (same cut as
@@ -328,7 +326,6 @@ export default function App() {
               </div>
               {view.displayProse(scan).trim() !== "" ? (
                 <section className="prose">
-                  <p className="section-label">Prose</p>
                   <pre>{view.displayProse(scan)}</pre>
                 </section>
               ) : null}
@@ -385,12 +382,6 @@ export default function App() {
                   <p>No KEY=VALUE settings in this note.</p>
                 </div>
               )}
-              <div className="detail-actions">
-                <button className="ghost" type="button" onClick={() => copy(`${selectedRow.uuid}:body`, body)}>
-                  {copied?.label === `${selectedRow.uuid}:body` ? <CheckIcon size={13} /> : <CopyIcon size={13} />}
-                  {copied?.label === `${selectedRow.uuid}:body` ? "copied" : "copy whole body"}
-                </button>
-              </div>
             </>
           ) : (
             <div className="empty tall">
