@@ -26,6 +26,16 @@ export type KeyEntry = {
   comment: string | null;
 };
 
+/**
+ * Display form for prose: blank lines (empty or whitespace-only) are dropped
+ * from both ends — the padding around the parser's skipped lines reads as
+ * noise in a panel — while interior blank lines and content indentation stay
+ * exactly as written. Empty in, empty out.
+ */
+export function trimBlankLines(text: string): string {
+  return text.replace(/^(\s*\n)+/, "").replace(/(\n\s*)+$/, "");
+}
+
 export type VaultView = {
   notes: NoteSummary[];
   noteRows: Map<string, ItemRow>;
@@ -71,7 +81,7 @@ export function buildVault(items: Map<string, ItemRow>): VaultView {
     untagged,
     formatWhen,
     scan: noteScan,
-    displayProse: (scan) => redactAssignments(scan.prose).replace(/\n+$/, ""),
+    displayProse: (scan) => trimBlankLines(redactAssignments(scan.prose)),
     keysOf: (row) => {
       const scanned = noteScan(row);
       return [...scanned.settings].map(([key, value]) => ({

@@ -1,6 +1,6 @@
 import { describe, expect, test } from "bun:test";
 import { buildTagGraph, flattenTagTree, tagForest, taggedNoteUuids } from "./tags.ts";
-import { buildVault } from "./vault.ts";
+import { buildVault, trimBlankLines } from "./vault.ts";
 import type { ItemRow } from "./store.ts";
 
 function tagRow(uuid: string, title: string, parentUuid: string | null, noteUuids: string[]): ItemRow {
@@ -103,6 +103,21 @@ describe("tag graph", () => {
     // stable across repeated calls (no shared mutable state)
     const rows2 = flattenTagTree(graph, tagForest(graph.parentOf));
     expect(rows2).toEqual(rows1);
+  });
+});
+
+describe("trimBlankLines", () => {
+  test("strips blank and whitespace-only lines from both ends", () => {
+    expect(trimBlankLines("\n\n  \nTOKEN=abc\n\n\t\n")).toBe("TOKEN=abc");
+  });
+
+  test("interior blank lines and content indentation survive", () => {
+    expect(trimBlankLines("  indented\n\nnext")).toBe("  indented\n\nnext");
+  });
+
+  test("all-blank prose collapses to empty", () => {
+    expect(trimBlankLines("\n \n\t\n")).toBe("");
+    expect(trimBlankLines("")).toBe("");
   });
 });
 
