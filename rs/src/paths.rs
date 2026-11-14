@@ -111,7 +111,7 @@ pub(crate) fn write_secret_file(path: &Path, contents: &str) -> std::io::Result<
 #[cfg(not(unix))]
 fn set_mode_700(_path: &Path) {}
 #[cfg(not(unix))]
-fn set_mode_600(_path: &Path) {}
+pub(crate) fn set_mode_600(_path: &Path) {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlainConfig {
