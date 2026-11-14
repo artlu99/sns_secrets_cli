@@ -229,22 +229,21 @@ pub fn cookie_pair(set_cookies: &[String], prefix: &str) -> String {
     String::new()
 }
 
-/// Helper for building POST requests with the client identity headers.
-pub fn post_request(url: String, headers: Vec<(String, String)>, body: String) -> HttpRequest {
+fn client_request(url: String, headers: Vec<(String, String)>, method: &'static str, body: Option<String>) -> HttpRequest {
     let mut all: Vec<(String, String)> = CLIENT_HEADERS
         .iter()
         .map(|(name, value)| (name.to_string(), value.to_string()))
         .collect();
     all.extend(headers);
-    HttpRequest { url, method: "POST", headers: all, body: Some(body) }
+    HttpRequest { url, method, headers: all, body }
+}
+
+/// Helper for building POST requests with the client identity headers.
+pub fn post_request(url: String, headers: Vec<(String, String)>, body: String) -> HttpRequest {
+    client_request(url, headers, "POST", Some(body))
 }
 
 /// The logout fallback's DELETE carries the same identity headers as a POST.
 pub fn delete_request(url: String, headers: Vec<(String, String)>) -> HttpRequest {
-    let mut all: Vec<(String, String)> = CLIENT_HEADERS
-        .iter()
-        .map(|(name, value)| (name.to_string(), value.to_string()))
-        .collect();
-    all.extend(headers);
-    HttpRequest { url, method: "DELETE", headers: all, body: None }
+    client_request(url, headers, "DELETE", None)
 }

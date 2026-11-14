@@ -257,15 +257,6 @@ pub fn parse_session_file(text: &str) -> Result<ParsedSession, SessionError> {
     Ok(parsed)
 }
 
-/// Names outside the session contract (`env.ts`'s assertSessionKeyNames).
-pub fn unexpected_keys(names: &[&str]) -> Vec<String> {
-    names
-        .iter()
-        .filter(|name| !SESSION_VALUE_KEYS.contains(name))
-        .map(|name| (*name).to_string())
-        .collect()
-}
-
 #[cfg(test)]
 mod tests {
     use super::*;
@@ -332,8 +323,8 @@ mod tests {
 
         let parsed = parse_session_file(&file).expect("parses");
         assert_eq!(parsed.public_key_base64.as_deref(), Some(public.to_base64().as_str()));
-        let names: Vec<&str> = parsed.fields.iter().map(|(name, _)| name.as_str()).collect();
-        assert_eq!(unexpected_keys(&names), Vec::<String>::new());
+        let names: Vec<String> = parsed.fields.iter().map(|(name, _)| name.clone()).collect();
+        assert_eq!(crate::session_file::first_unexpected(&names), None, "every session field is inside the contract");
         assert_eq!(parsed.fields.len(), SESSION_VALUE_KEYS.len());
 
         for (name, value) in values {

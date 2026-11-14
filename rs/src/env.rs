@@ -20,6 +20,35 @@ pub fn scrubbed_env() -> HashMap<String, String> {
     std::env::vars().filter(|(key, _)| !is_secret_env_name(key)).collect()
 }
 
+/// A child-process `Command` with the scrubbed environment pre-applied. The
+/// `env_clear()` + `envs(scrubbed_env())` pairing is the security property
+/// doctor's scrub check probes; this keeps new spawn sites from half-copying
+/// it (`envs(scrubbed_env())` alone still leaks the launch env).
+pub fn scrubbed_command(bin: &str) -> std::process::Command {
+    let mut command = std::process::Command::new(bin);
+    command.env_clear().envs(scrubbed_env());
+    command
+}
+
+/// `Bun.which` — a PATH walk with one stat per candidate, true only when the
+/// entry is a regular file with an exec bit (unix).
+pub fn which(bin: &str) -> bool {
+    std::env::var("PATH").unwrap_or_default().split(':').any(|dir| {
+        let candidate = std::path::Path::new(dir).join(bin);
+        std::fs::metadata(&candidate)
+            .map(|meta| {
+                #[cfg(unix)]
+                {
+                    use std::os::unix::fs::PermissionsExt;
+                    meta.is_file() && meta.permissions().mode() & 0o111 != 0
+                }
+                #[cfg(not(unix))]
+                meta.is_file()
+            })
+            .unwrap_or(false)
+    })
+}
+
 /// `scrubbedEnv(base)` for probes that need a doctored copy of the current
 /// environment.
 pub fn scrubbed_env_with(base: &HashMap<String, String>) -> HashMap<String, String> {

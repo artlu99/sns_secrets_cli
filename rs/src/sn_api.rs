@@ -19,8 +19,9 @@ use crate::kdf::{self, KdfParams};
 use crate::proto004::EncryptedItem;
 
 /// `src/session-file.ts`'s SessionSecrets. The db_key is the one secret this
-/// struct carries; it moves to a Zeroizing type when the session-file port
-/// lands and the field stops crossing module boundaries as a plain string.
+/// struct carries in plain heap memory; the Debug impl redacts it, and a
+/// `Zeroizing<String>` wrap is a candidate follow-up (it costs a serde-less
+/// ripple through every construction site).
 #[derive(Clone, PartialEq, Eq)]
 pub struct SessionSecrets {
     pub account_email: String,

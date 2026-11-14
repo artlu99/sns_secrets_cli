@@ -137,7 +137,7 @@ fn apply_schema_and_migrations(conn: &Connection) -> Result<(), DbError> {
 }
 
 /// The TS regex `/^[0-9a-fA-F]{64}$/` without a regex dependency.
-fn is_64_hex(value: &str) -> bool {
+pub(crate) fn is_64_hex(value: &str) -> bool {
     value.len() == 64 && value.chars().all(|c| c.is_ascii_hexdigit())
 }
 
@@ -185,9 +185,10 @@ CREATE TABLE IF NOT EXISTS sync_state (
 ";
 
 impl CacheDb {
-    /// TS `db.close()` — releases the file lock (fully on Drop, which runs
-    /// when the last reference to this CacheDb goes away).
-    pub fn close(&self) {}
+    /// TS `db.close()` — closing consumes the handle, so the connection
+    /// (and its file lock) is provably gone after the call; the actual
+    /// release is Drop.
+    pub fn close(self) {}
 
     /// `db.exec` / `db.run` — one statement or batch, no rows.
     pub fn conn_execute(&self, sql: &str) -> Result<(), DbError> {

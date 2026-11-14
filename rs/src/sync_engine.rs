@@ -8,6 +8,7 @@ use std::collections::HashMap;
 use serde_json::Value;
 
 use crate::db::{CacheDb, DbError, ItemRow};
+use crate::notes::HIDDEN_TYPES;
 use crate::proto004::{self, EncryptedItem};
 use crate::sn_api::{ApiClientError, SyncPage};
 
@@ -35,9 +36,6 @@ pub fn stored_types_version() -> String {
     sorted.sort_unstable();
     sorted.join(",")
 }
-
-/// Same hidden set as notes.ts — these types never yield a title.
-pub const HIDDEN_TYPES: [&str; 3] = ["SN|ItemsKey", "SN|KeySystemItemsKey", "SN|KeySystemRootKey"];
 
 pub fn drop_unstored_types(db: &CacheDb) -> Result<(), DbError> {
     let keep = STORED_TYPES.iter().map(|kind| format!("'{kind}'")).collect::<Vec<_>>().join(", ");
@@ -214,6 +212,18 @@ impl From<DbError> for SyncError {
     }
 }
 
+impl From<SyncError> for ApiClientError {
+    fn from(error: SyncError) -> Self {
+        // The Api variant survives so with_access still sees 401/498 and can
+        // refresh-and-retry; everything else flattens to a user-facing
+        // message.
+        match error {
+            SyncError::Fetch(client_error) => client_error,
+            other => Self::User(other.to_string()),
+        }
+    }
+}
+
 pub struct SyncOptions<'a> {
     pub db: &'a CacheDb,
     pub master_key: Option<String>,
@@ -221,19 +231,25 @@ pub struct SyncOptions<'a> {
     pub now_ms: i64,
 }
 
+/// The mutable sync state one pull threads through every page: items keys
+/// accumulate, the master key may arrive mid-pull, and the deferred retry
+/// list and the report span the whole pull.
+struct SyncState {
+    items_keys: HashMap<String, String>,
+    master_key: Option<String>,
+    prompted: bool,
+    deferred: Vec<EncryptedItem>,
+    report: SyncReport,
+}
+
 /// Consume one page: items keys first (so their notes can decrypt), then the
 /// rest. Notes whose key has not been seen yet are deferred to a retry after
 /// the pull. A decrypting items key failing is a hard error; a failed note is
 /// skipped and counted.
-#[allow(clippy::too_many_arguments)]
 fn consume(
     items: &[EncryptedItem],
-    items_keys: &mut HashMap<String, String>,
-    master_key: &mut Option<String>,
-    prompted: &mut bool,
+    state: &mut SyncState,
     ensure_master_key: &mut dyn FnMut() -> Result<String, SyncError>,
-    deferred: &mut Vec<EncryptedItem>,
-    report: &mut SyncReport,
 ) -> Result<Vec<ItemRow>, SyncError> {
     let mut rows = Vec::new();
     // Items keys first, so their notes can decrypt in the same page.
@@ -248,15 +264,15 @@ fn consume(
         if !is_stored_type(&item.content_type) {
             continue;
         }
-        let result = match decrypt_one(item, items_keys, master_key.as_deref()) {
+        let result = match decrypt_one(item, &mut state.items_keys, state.master_key.as_deref()) {
             Ok(Outcome::NeedMaster) => {
-                if master_key.is_none() {
-                    if *prompted {
+                if state.master_key.is_none() {
+                    if state.prompted {
                         return Err(SyncError::User("that password did not unwrap item keys".into()));
                     }
-                    *prompted = true;
-                    *master_key = Some(ensure_master_key()?);
-                    decrypt_one(item, items_keys, master_key.as_deref())
+                    state.prompted = true;
+                    state.master_key = Some(ensure_master_key()?);
+                    decrypt_one(item, &mut state.items_keys, state.master_key.as_deref())
                 } else {
                     Ok(Outcome::NeedMaster)
                 }
@@ -271,11 +287,11 @@ fn consume(
                 }
                 if item.deleted != Some(true)
                     && item.items_key_id.is_some()
-                    && !items_keys.contains_key(item.items_key_id.as_deref().expect("checked"))
+                    && !state.items_keys.contains_key(item.items_key_id.as_deref().expect("checked"))
                 {
-                    deferred.push(item.clone());
+                    state.deferred.push(item.clone());
                 } else {
-                    report.skipped += 1;
+                    state.report.skipped += 1;
                 }
             }
             Err(error) => {
@@ -283,7 +299,7 @@ fn consume(
                     return Err(SyncError::User("that password did not unwrap item keys".into()));
                 }
                 let _ = error;
-                report.skipped += 1;
+                state.report.skipped += 1;
             }
         }
     }
@@ -301,10 +317,14 @@ pub fn run_sync(
     fetch_page: FetchPage<'_>,
     ensure_master_key: EnsureMasterKey<'_>,
 ) -> Result<SyncReport, SyncError> {
-    let mut items_keys = load_items_keys(options.db)?;
+    let mut sync = SyncState {
+        items_keys: load_items_keys(options.db)?,
+        master_key: options.master_key.clone(),
+        prompted: options.master_key.is_some(),
+        deferred: Vec::new(),
+        report: SyncReport::default(),
+    };
     drop_unstored_types(options.db)?;
-    let mut master_key = options.master_key.clone();
-    let mut prompted = options.master_key.is_some();
     let state = options.db.read_sync_state()?;
     // The token only applies to the stored-type set that produced it; after a
     // change (e.g. tags newly stored) the incremental feed would never resend
@@ -320,28 +340,18 @@ pub fn run_sync(
     };
     let mut cursor: Option<String> = None;
     let mut newest_token = sync_token.clone();
-    let mut deferred: Vec<EncryptedItem> = Vec::new();
-    let mut report = SyncReport::default();
 
     loop {
         let page = fetch_page(sync_token.as_deref(), cursor.as_deref()).map_err(SyncError::Fetch)?;
-        report.pages += 1;
-        report.conflicts += page.conflicts;
+        sync.report.pages += 1;
+        sync.report.conflicts += page.conflicts;
         if let Some(token) = &page.sync_token {
             newest_token = Some(token.clone());
         }
-        let rows = consume(
-            &page.items,
-            &mut items_keys,
-            &mut master_key,
-            &mut prompted,
-            ensure_master_key,
-            &mut deferred,
-            &mut report,
-        )?;
+        let rows = consume(&page.items, &mut sync, ensure_master_key)?;
         if !rows.is_empty() {
             options.db.upsert_items(&rows)?;
-            report.upserted += rows.len();
+            sync.report.upserted += rows.len();
         }
         cursor = page.cursor_token;
         if cursor.is_none() {
@@ -349,21 +359,21 @@ pub fn run_sync(
         }
     }
 
-    if !deferred.is_empty() {
+    if !sync.deferred.is_empty() {
         let mut rows = Vec::new();
-        for item in &deferred {
+        for item in &sync.deferred {
             // TS lets a decrypt failure on the deferred retry propagate, so
             // writeSyncState never runs and the item is resent next sync —
             // swallowing it here would silently lose the note forever.
-            match decrypt_one(item, &mut items_keys, master_key.as_deref()) {
+            match decrypt_one(item, &mut sync.items_keys, sync.master_key.as_deref()) {
                 Ok(Outcome::Row(row)) => rows.push(row),
-                Ok(_) => report.skipped += 1,
+                Ok(_) => sync.report.skipped += 1,
                 Err(error) => return Err(SyncError::Decrypt(error.to_string())),
             }
         }
         if !rows.is_empty() {
             options.db.upsert_items(&rows)?;
-            report.upserted += rows.len();
+            sync.report.upserted += rows.len();
         }
     }
 
@@ -372,7 +382,7 @@ pub fn run_sync(
         options.now_ms,
         Some(&format!("{}|{}", stored_types_version(), newest_token.as_deref().unwrap_or(""))),
     )?;
-    Ok(report)
+    Ok(sync.report)
 }
 
 #[cfg(test)]

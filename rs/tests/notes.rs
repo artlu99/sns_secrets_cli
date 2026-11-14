@@ -33,8 +33,8 @@ fn temp_db(tag: &str) -> TempDb {
 
 impl Drop for TempDb {
     fn drop(&mut self) {
-        self.0.close();
         remove_cache_files(&self.1);
+        // the CacheDb field drops right after this body, closing the file
     }
 }
 

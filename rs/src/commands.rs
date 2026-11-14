@@ -16,9 +16,10 @@ use crate::kdf::derive_root_key;
 use crate::lock::acquire_sync_lock;
 use crate::notes::{
     tag_forest,
-    format_when, list_notes, note_body, note_scan, plan_copy, render_copy_keys,
-    render_note_inventory, render_tag_groups, resolve_note, resolve_tag, search_notes, tag_graph,
-    tagged_note_uuids, CopyPlan, ListOptions, ListedNote, ListedTag, PROSE_TYPES,
+    format_when, json_string, list_notes, note_body, note_scan, pad_end, plan_copy,
+    render_copy_keys, render_note_inventory, render_tag_groups, resolve_note, resolve_tag,
+    search_notes, tag_graph, tagged_note_uuids, CopyPlan, ListOptions, ListedNote, ListedTag,
+    PROSE_TYPES,
 };
 use crate::pager::{page_if_tall, PageOptions};
 use crate::paths::{
@@ -26,9 +27,10 @@ use crate::paths::{
     unexpected_config_files, write_plain_config,
 };
 use crate::prompt::{prompt_line, prompt_secret};
-use crate::session_file::{delete_session, load_session, save_session, session_key_names};
-use crate::sn_api::{random_db_key, with_access, ApiClient, SessionSecrets};
+use crate::session_file::{delete_session, load_session, persist, save_session, session_key_names};
+use crate::sn_api::{random_db_key, with_access, ApiClient, ApiClientError, SessionSecrets};
 use crate::sync_engine::{run_sync, SyncOptions, SyncReport};
+use crate::time::now_ms;
 
 // ---------------------------------------------------------------------------
 // shared helpers
@@ -82,13 +84,6 @@ pub fn open_cache() -> Result<CacheDb, UserError> {
     open_database(&db_path(), &secrets.db_key).map_err(UserError::from)
 }
 
-fn now_ms() -> i64 {
-    std::time::SystemTime::now()
-        .duration_since(std::time::SystemTime::UNIX_EPOCH)
-        .map(|elapsed| elapsed.as_millis() as i64)
-        .unwrap_or(0)
-}
-
 // ---------------------------------------------------------------------------
 // doctor
 
@@ -111,19 +106,34 @@ fn check_line(check: &Check) -> String {
 }
 
 pub fn doctor_checks() -> Vec<Check> {
-    let mut checks = Vec::new();
-    checks.push(Check {
-        name: "runtime",
-        ok: true,
-        skip: false,
-        detail: format!("sns {} (rust rewrite)", env!("CARGO_PKG_VERSION")),
-    });
+    // One load for both session checks — decrypting eight fields is not free,
+    // and doctor used to do it three times over.
+    let session = load_session();
+    vec![
+        Check {
+            name: "runtime",
+            ok: true,
+            skip: false,
+            detail: format!("sns {} (rust rewrite)", env!("CARGO_PKG_VERSION")),
+        },
+        config_check(),
+        keychain_check(),
+        session_check(&session),
+        cache_check(&session),
+        scrub_check(),
+        password_check(),
+        env_check(),
+        at_rest_check(),
+        files_check(),
+    ]
+}
 
-    let config_result: Result<(), String> = {
+fn config_check() -> Check {
+    let readable: Result<(), String> = {
         ensure_config_dir();
         std::fs::read_to_string(env_path()).map(|_| ()).map_err(|error| error.to_string())
     };
-    checks.push(match config_result {
+    match readable {
         Ok(()) => Check {
             name: "config",
             ok: true,
@@ -136,185 +146,202 @@ pub fn doctor_checks() -> Vec<Check> {
             skip: false,
             detail: "config directory or .env is not readable".into(),
         },
-    });
+    }
+}
 
-    let keychain = keychain::secret_service_available();
-    if !keychain {
-        checks.push(Check {
+fn keychain_check() -> Check {
+    if !keychain::secret_service_available() {
+        return Check {
             name: "keychain",
             ok: true,
             skip: true,
             detail: "no secret service on this machine — the session key stays in .env.keys".into(),
-        });
-    } else if !session_path().exists() {
-        checks.push(Check {
+        };
+    }
+    if !session_path().exists() {
+        return Check {
             name: "keychain",
             ok: true,
             skip: true,
             detail: "secret service is available; nothing stored yet".into(),
-        });
-    } else {
-        checks.push(match keychain::keychain_get() {
-            Some(_) => Check {
-                name: "keychain",
-                ok: true,
-                skip: false,
-                detail: "session key retrieved".into(),
-            },
-            None => Check {
-                name: "keychain",
-                ok: false,
-                skip: false,
-                detail: "session exists but the keychain has no session key".into(),
-            },
-        });
+        };
     }
+    match keychain::keychain_get() {
+        Some(_) => Check {
+            name: "keychain",
+            ok: true,
+            skip: false,
+            detail: "session key retrieved".into(),
+        },
+        None => Check {
+            name: "keychain",
+            ok: false,
+            skip: false,
+            detail: "session exists but the keychain has no session key".into(),
+        },
+    }
+}
 
+fn session_check(session: &Result<Option<SessionSecrets>, UserError>) -> Check {
     if !session_path().exists() {
-        checks.push(Check {
+        return Check {
             name: "session",
             ok: true,
             skip: true,
             detail: "not logged in".into(),
-        });
-    } else {
-        let session_check: Result<String, String> = {
-            let names = session_key_names();
-            if let Some(unexpected) = crate::session_file::first_unexpected(&names) {
-                Err(format!("unexpected session key {unexpected}"))
-            } else {
-                match load_session().map_err(|error| error.to_string()) {
-                    Ok(Some(secrets)) => {
-                        let _ = secrets;
-                        Ok(format!(
-                            "decrypts ({})",
-                            names.iter().filter(|name| !name.starts_with("DOTENV_PUBLIC")).cloned().collect::<Vec<_>>().join(", ")
-                        ))
-                    }
-                    Ok(None) => Err("session file has no fields".to_string()),
-                    Err(error) => Err(error),
-                }
-            }
         };
-        checks.push(match session_check {
-            Ok(detail) => Check {
+    }
+    let names = session_key_names();
+    if let Some(unexpected) = crate::session_file::first_unexpected(&names) {
+        return Check {
+            name: "session",
+            ok: false,
+            skip: false,
+            detail: format!("unexpected session key {unexpected}"),
+        };
+    }
+    match session {
+        Ok(Some(secrets)) => {
+            let _ = secrets;
+            Check {
                 name: "session",
                 ok: true,
                 skip: false,
-                detail,
-            },
-            Err(message) => Check {
-                name: "session",
-                ok: false,
-                skip: false,
-                detail: message,
-            },
-        });
+                detail: format!(
+                    "decrypts ({})",
+                    names.iter().filter(|name| !name.starts_with("DOTENV_PUBLIC")).cloned().collect::<Vec<_>>().join(", ")
+                ),
+            }
+        }
+        Ok(None) => Check {
+            name: "session",
+            ok: false,
+            skip: false,
+            detail: "session file has no fields".into(),
+        },
+        Err(error) => Check {
+            name: "session",
+            ok: false,
+            skip: false,
+            detail: error.to_string(),
+        },
     }
+}
 
+fn cache_check(session: &Result<Option<SessionSecrets>, UserError>) -> Check {
     if !db_path().exists() {
-        checks.push(Check {
+        return Check {
             name: "cache",
             ok: true,
             skip: true,
             detail: "no cache.db yet".into(),
-        });
-    } else {
-        let cache_check: Result<String, String> = match load_session().map_err(|error| error.to_string()) {
-            Ok(Some(secrets)) => {
-                let db = open_database(&db_path(), &secrets.db_key).map_err(|error| error.to_string());
-                match db {
-                    Ok(db) => {
-                        let tables = db.sqlite_master_count().map_err(|error| error.to_string());
-                        match tables {
-                            Ok(tables) => {
-                                db.close();
-                                Ok(format!("opened ({tables} sqlite_master rows)"))
-                            }
-                            Err(error) => {
-                                let _ = db;
-                                Err(error)
-                            }
-                        }
-                    }
-                    Err(error) => Err(error),
-                }
-            }
-            Ok(None) => Err("cache.db exists but there is no session key — the next sns login replaces it, or run sns logout --delete-cache".to_string()),
-            Err(error) => Err(error),
         };
-        checks.push(match cache_check {
-            Ok(detail) => Check {
-                name: "cache",
-                ok: true,
-                skip: false,
-                detail,
-            },
-            Err(message) => Check {
-                name: "cache",
-                ok: false,
-                skip: false,
-                detail: message,
-            },
-        });
     }
-
-    // Probe a real child process with sentinel secret variables under the
-    // scrubbed map — the child must see neither.
-    {
-        let mut probe: HashMap<String, String> = std::env::vars().collect();
-        probe.insert("SN_DB_KEY".into(), "scrub-sentinel".into());
-        probe.insert("DOTENV_PRIVATE_KEY_SESSION".into(), "scrub-sentinel".into());
-        let probe = crate::env::scrubbed_env_with(&probe);
-        let child = std::process::Command::new("sh")
-            .args(["-c", r#"printf %s "$SN_DB_KEY$DOTENV_PRIVATE_KEY_SESSION""#])
-            .env_clear()
-            .envs(probe)
-            .output();
-        checks.push(match child {
-            Ok(output) if output.status.success() && output.stdout.is_empty() => Check {
-                name: "scrub",
-                ok: true,
-                skip: false,
-                detail: "child environment has no secret variables".into(),
-            },
-            Ok(output) => Check {
-                name: "scrub",
+    let secrets = match session {
+        Ok(Some(secrets)) => secrets,
+        Ok(None) => {
+            return Check {
+                name: "cache",
                 ok: false,
                 skip: false,
-                detail: format!(
-                    "child probe exited {}{}",
-                    output.status.code().unwrap_or(-1),
-                    if output.stdout.is_empty() { "" } else { " and saw secret variables" }
-                ),
-            },
-            Err(error) => Check {
-                name: "scrub",
+                detail: "cache.db exists but there is no session key — the next sns login replaces it, or run sns logout --delete-cache".into(),
+            }
+        }
+        Err(error) => {
+            return Check {
+                name: "cache",
                 ok: false,
                 skip: false,
                 detail: error.to_string(),
-            },
-        });
+            }
+        }
+    };
+    let detail = match open_database(&db_path(), &secrets.db_key) {
+        Ok(db) => match db.sqlite_master_count() {
+            Ok(tables) => {
+                db.close();
+                Ok(format!("opened ({tables} sqlite_master rows)"))
+            }
+            Err(error) => Err(error.to_string()),
+        },
+        Err(error) => Err(error.to_string()),
+    };
+    match detail {
+        Ok(detail) => Check {
+            name: "cache",
+            ok: true,
+            skip: false,
+            detail,
+        },
+        Err(message) => Check {
+            name: "cache",
+            ok: false,
+            skip: false,
+            detail: message,
+        },
     }
+}
 
+fn scrub_check() -> Check {
+    // Probe a real child process with sentinel secret variables under the
+    // scrubbed map — the child must see neither.
+    let mut probe: HashMap<String, String> = std::env::vars().collect();
+    probe.insert("SN_DB_KEY".into(), "scrub-sentinel".into());
+    probe.insert("DOTENV_PRIVATE_KEY_SESSION".into(), "scrub-sentinel".into());
+    let probe = crate::env::scrubbed_env_with(&probe);
+    let child = std::process::Command::new("sh")
+        .args(["-c", r#"printf %s "$SN_DB_KEY$DOTENV_PRIVATE_KEY_SESSION""#])
+        .env_clear()
+        .envs(probe)
+        .output();
+    match child {
+        Ok(output) if output.status.success() && output.stdout.is_empty() => Check {
+            name: "scrub",
+            ok: true,
+            skip: false,
+            detail: "child environment has no secret variables".into(),
+        },
+        Ok(output) => Check {
+            name: "scrub",
+            ok: false,
+            skip: false,
+            detail: format!(
+                "child probe exited {}{}",
+                output.status.code().unwrap_or(-1),
+                if output.stdout.is_empty() { "" } else { " and saw secret variables" }
+            ),
+        },
+        Err(error) => Check {
+            name: "scrub",
+            ok: false,
+            skip: false,
+            detail: error.to_string(),
+        },
+    }
+}
+
+fn password_check() -> Check {
     let password_var = "SN_PASSWORD";
-    let launched = scrubbed_env_names();
-    if launched.iter().any(|name| name == password_var) {
-        checks.push(Check {
+    if scrubbed_env_names().iter().any(|name| name == password_var) {
+        Check {
             name: "password",
             ok: false,
             skip: false,
             detail: format!("{password_var} was set at launch and was scrubbed — sns never reads a password from the environment"),
-        });
+        }
     } else {
-        checks.push(Check {
+        Check {
             name: "password",
             ok: true,
             skip: false,
             detail: format!("{password_var} was not in the launch environment"),
-        });
+        }
     }
-    checks.push(if launched.is_empty() {
+}
+
+fn env_check() -> Check {
+    let launched = scrubbed_env_names();
+    if launched.is_empty() {
         Check {
             name: "env",
             ok: true,
@@ -328,39 +355,41 @@ pub fn doctor_checks() -> Vec<Check> {
             skip: false,
             detail: format!("secret-named variables scrubbed at launch: {}", launched.join(", ")),
         }
-    });
+    }
+}
 
-    if db_path().exists() {
-        let header = std::fs::read(db_path())
-            .map(|bytes| bytes[..16.min(bytes.len())].to_vec())
-            .unwrap_or_default();
-        let plaintext = header.starts_with(b"SQLite format 3");
-        checks.push(if plaintext {
-            Check {
-                name: "at-rest",
-                ok: false,
-                skip: false,
-                detail: "cache.db is a plaintext SQLite file".into(),
-            }
-        } else {
-            Check {
-                name: "at-rest",
-                ok: true,
-                skip: false,
-                detail: "cache.db is not a plaintext SQLite file".into(),
-            }
-        });
-    } else {
-        checks.push(Check {
+fn at_rest_check() -> Check {
+    if !db_path().exists() {
+        return Check {
             name: "at-rest",
             ok: true,
             skip: true,
             detail: "no cache.db yet".into(),
-        });
+        };
     }
+    let header = std::fs::read(db_path())
+        .map(|bytes| bytes[..16.min(bytes.len())].to_vec())
+        .unwrap_or_default();
+    if header.starts_with(b"SQLite format 3") {
+        Check {
+            name: "at-rest",
+            ok: false,
+            skip: false,
+            detail: "cache.db is a plaintext SQLite file".into(),
+        }
+    } else {
+        Check {
+            name: "at-rest",
+            ok: true,
+            skip: false,
+            detail: "cache.db is not a plaintext SQLite file".into(),
+        }
+    }
+}
 
+fn files_check() -> Check {
     let extra = unexpected_config_files();
-    checks.push(if extra.is_empty() {
+    if extra.is_empty() {
         Check {
             name: "files",
             ok: true,
@@ -374,9 +403,7 @@ pub fn doctor_checks() -> Vec<Check> {
             skip: false,
             detail: format!("unexpected files: {}", extra.join(", ")),
         }
-    });
-
-    checks
+    }
 }
 
 pub fn doctor_command() -> i32 {
@@ -483,13 +510,8 @@ pub fn logout_command(delete_cache: bool) -> Result<(), UserError> {
     if let Some(secrets) = &secrets {
         // Refresh first if needed, so logout works after the access token
         // expired — the common case, since access tokens are short-lived.
-        let mut save = |next: &SessionSecrets| {
-            save_session(next)
-                .map(|_| ())
-                .map_err(|error| crate::sn_api::ApiClientError::User(error.to_string()))
-        };
         let mut run = |current: &SessionSecrets| api.logout(current);
-        match with_access(secrets, &mut save, &api, now_ms().max(0) as u64, &mut run) {
+        match with_access(secrets, &mut persist, &api, now_ms() as u64, &mut run) {
             Ok(()) => revoked = true,
             Err(error) => eprintln!("server revoke failed ({error}); local secrets will still be deleted"),
         }
@@ -531,12 +553,7 @@ pub fn pull_notes(
     let release = acquire_sync_lock(30_000)?;
     let opened = open_database_or_replace(&db_path(), &secrets.db_key).map_err(UserError::from)?;
     println!("pulling notes");
-    let outcome: Result<SyncReport, crate::sn_api::ApiClientError> = {
-        let mut save = |next: &SessionSecrets| {
-            save_session(next)
-                .map(|_| ())
-                .map_err(|error| crate::sn_api::ApiClientError::User(error.to_string()))
-        };
+    let outcome: Result<SyncReport, ApiClientError> = {
         let email = email.to_string();
         let mut run = |current: &SessionSecrets| {
             let current = current.clone();
@@ -549,7 +566,7 @@ pub fn pull_notes(
                     .map_err(|error| crate::sync_engine::SyncError::User(error.to_string()))?;
                 let params = api
                     .key_params(&email, &mut || {
-                        prompt_secret("Two-factor code").map_err(|error| crate::sn_api::ApiClientError::User(error.to_string()))
+                        prompt_secret("Two-factor code").map_err(|error| ApiClientError::User(error.to_string()))
                     })
                     .map_err(crate::sync_engine::SyncError::Fetch)?;
                 let root = derive_root_key(&password, &params)
@@ -566,13 +583,10 @@ pub fn pull_notes(
                 &mut fetch_page,
                 &mut ensure_master_key,
             )
-            .map_err(|error| match error {
-                // keep the Api variant so with_access still sees 401/498
-                crate::sync_engine::SyncError::Fetch(client_error) => client_error,
-                other => crate::sn_api::ApiClientError::User(other.to_string()),
-            })
+            // keeps the Api variant so with_access still sees 401/498
+            .map_err(ApiClientError::from)
         };
-        with_access(secrets, &mut save, api, now_ms().max(0) as u64, &mut run)
+        with_access(secrets, &mut persist, api, now_ms() as u64, &mut run)
     };
     let outcome = match outcome {
         Ok(report) => {
@@ -624,13 +638,18 @@ pub fn sync_command() -> Result<(), UserError> {
 
 pub fn list_command(kind: Option<&str>, tag: Option<&str>, limit: usize, all: bool) -> Result<(), UserError> {
     let db = open_cache()?;
-    // one graph for resolution, filtering, and rendering
-    let graph = tag_graph(&db).map_err(UserError::from)?;
+    // The graph costs a full pass over note contents, so it is built eagerly
+    // only when a tag selector needs it — an empty listing without a tag
+    // never renders, and never pays for the graph.
     let resolved_tag = match tag {
-        Some(tag) => Some(resolve_tag(&graph, tag)?),
+        Some(tag) => {
+            let graph = tag_graph(&db).map_err(UserError::from)?;
+            let resolved = resolve_tag(&graph, tag)?;
+            Some((graph, resolved))
+        }
         None => None,
     };
-    let tag_uuids = resolved_tag.as_ref().map(|tag| tagged_note_uuids(&graph, &tag.uuid));
+    let tag_uuids = resolved_tag.as_ref().map(|(graph, tag)| tagged_note_uuids(graph, &tag.uuid));
     // the default view is the secrets view: only notes whose prose carries
     // env-style settings; --all and explicit non-prose type selectors escape it
     let env = !all && (kind.is_none() || kind.is_some_and(|kind| PROSE_TYPES.contains(&kind)));
@@ -656,6 +675,10 @@ pub fn list_command(kind: Option<&str>, tag: Option<&str>, limit: usize, all: bo
         println!("{label} {where_clause}{hint}");
         return Ok(());
     }
+    let graph = match resolved_tag {
+        Some((graph, _)) => graph,
+        None => tag_graph(&db).map_err(UserError::from)?,
+    };
     let table = render_tag_groups(&graph, &notes);
     // one terminal-only hint that <id> accepts a title or a uuid, prefix is
     // enough; omitted when piped so a script reading the table gets a table.
@@ -762,9 +785,28 @@ pub fn tags_command() -> Result<(), UserError> {
         println!("no tags in the cache — run sns sync");
         return Ok(());
     }
-    let tree = crate::commands::render_tag_tree(&tags);
+    let tree = render_tag_tree(&tags);
     page_if_tall(&tree, &PageOptions { warn: true, no_pager: false })
 }
+
+/// The note actions as value/label pairs, like the TS select: the label
+/// shows in the menu, the value dispatches. Dispatching on the label alone
+/// once matched lowercase values against capitalized options and every pick
+/// — Quit included — fell through to Copy.
+#[derive(Clone, Copy, PartialEq, Eq)]
+enum BrowseAction {
+    View,
+    Copy,
+    Back,
+    Quit,
+}
+
+const BROWSE_ACTIONS: [(BrowseAction, &str); 4] = [
+    (BrowseAction::View, "View"),
+    (BrowseAction::Copy, "Copy"),
+    (BrowseAction::Back, "Back"),
+    (BrowseAction::Quit, "Quit"),
+];
 
 pub fn browse_command() -> Result<(), UserError> {
     intro("");
@@ -793,19 +835,19 @@ pub fn browse_command() -> Result<(), UserError> {
         }
         let selected = notes[picked].uuid.clone();
         let selected_title = notes[picked].title.clone();
-        let actions = ["View".to_string(), "Copy".to_string(), "Back".to_string(), "Quit".to_string()];
-        let action = numbered_select(&selected_title, &actions)?;
-        match actions[action].as_str() {
-            "quit" => break,
-            "back" => continue,
-            "view" => {
+        let labels: Vec<String> = BROWSE_ACTIONS.iter().map(|(_, label)| label.to_string()).collect();
+        let picked = numbered_select(&selected_title, &labels)?;
+        match BROWSE_ACTIONS[picked].0 {
+            BrowseAction::Quit => break,
+            BrowseAction::Back => continue,
+            BrowseAction::View => {
                 let row = resolve_note(&db, &selected, false)?;
                 // View draws the same masked inventory `sns show` does — there
                 // is no full-text view here either; the note itself lives in
                 // Standard Notes.
                 page_if_tall(&inventory_text(&row, &selected_title), &PageOptions { no_pager: false, warn: false })?;
             }
-            _ => {
+            BrowseAction::Copy => {
                 let row = resolve_note(&db, &selected, false)?;
                 // the same plan as `sns copy`: on a settings note the picker
                 // copies one chosen value, never the whole body
@@ -831,25 +873,11 @@ pub fn browse_command() -> Result<(), UserError> {
 
 
 
-fn json_string(value: &str) -> String {
-    serde_json::to_string(value).expect("string serialization is infallible")
-}
-
-
 fn count_label(notes: usize) -> String {
     match notes {
         0 => "(empty)".to_string(),
         1 => "(1 note)".to_string(),
         notes => format!("({notes} notes)"),
-    }
-}
-
-fn pad(text: &str, width: usize) -> String {
-    let len = text.chars().count();
-    if len >= width {
-        text.to_string()
-    } else {
-        format!("{text}{}", " ".repeat(width - len))
     }
 }
 
@@ -899,21 +927,20 @@ pub fn render_tag_tree(tags: &[ListedTag]) -> String {
         emitted.insert(tag.to_string());
         let entry = by_uuid.get(tag).expect("emitted tags exist in the map");
         rows.push((format!("{}{}", "  ".repeat(depth), entry.title), count_label(entry.notes)));
-        for child in children_of.get(tag).cloned().unwrap_or_default() {
-            emit(&child, depth + 1, by_uuid, children_of, rows, emitted);
+        if let Some(children) = children_of.get(tag) {
+            for child in children {
+                emit(child, depth + 1, by_uuid, children_of, rows, emitted);
+            }
         }
     }
     for tag in tags {
-        if emitted.contains(&tag.uuid)
-            || !forest.is_root(&parent_of, &tag.uuid)
-            || forest.cycle_root(&parent_of, &tag.uuid)
-        {
+        if emitted.contains(&tag.uuid) || !forest.is_root(&tag.uuid) || forest.cycle_root(&tag.uuid) {
             continue;
         }
         emit(&tag.uuid, 0, &by_uuid, &children_of, &mut rows, &mut emitted);
     }
     for tag in tags {
-        if emitted.contains(&tag.uuid) || !forest.cycle_root(&parent_of, &tag.uuid) {
+        if emitted.contains(&tag.uuid) || !forest.cycle_root(&tag.uuid) {
             continue;
         }
         emit(&tag.uuid, 0, &by_uuid, &children_of, &mut rows, &mut emitted);
@@ -927,7 +954,7 @@ pub fn render_tag_tree(tags: &[ListedTag]) -> String {
     let width = rows.iter().map(|(label, _)| label.chars().count()).max().unwrap_or(0);
     rows
         .iter()
-        .map(|(label, count)| format!("{}  {}", pad(label, width), count))
+        .map(|(label, count)| format!("{}  {}", pad_end(label, width), count))
         .collect::<Vec<_>>()
         .join("\n")
 }

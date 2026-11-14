@@ -3,7 +3,7 @@
 
 use std::io::{IsTerminal as _, Write as _};
 
-use crate::env::scrubbed_env;
+use crate::env::{scrubbed_command, which};
 use crate::errors::UserError;
 
 /// stdout write that treats a closed pipe as done, not as a crash: piping
@@ -41,10 +41,8 @@ pub fn page(text: &str, options: &PageOptions) -> Result<(), UserError> {
         write_stdout(&body);
         return Ok(());
     }
-    let mut child = std::process::Command::new("less")
+    let mut child = scrubbed_command("less")
         .arg("-R")
-        .env_clear()
-        .envs(scrubbed_env())
         .stdin(std::process::Stdio::piped())
         .spawn()
         .map_err(|_| UserError("could not start less".into()))?;
@@ -77,22 +75,4 @@ pub fn page_if_tall(text: &str, options: &PageOptions) -> Result<(), UserError> 
 
 fn terminal_rows() -> Option<usize> {
     terminal_size::terminal_size().map(|(_width, height)| height.0 as usize)
-}
-
-fn which(bin: &str) -> bool {
-    std::env::var("PATH").unwrap_or_default().split(':').any(|dir| {
-        let candidate = std::path::Path::new(dir).join(bin);
-        candidate.is_file()
-            && std::fs::metadata(&candidate)
-                .map(|meta| {
-                    #[cfg(unix)]
-                    {
-                        use std::os::unix::fs::PermissionsExt;
-                        meta.permissions().mode() & 0o111 != 0
-                    }
-                    #[cfg(not(unix))]
-                    true
-                })
-                .unwrap_or(false)
-    })
 }

@@ -46,12 +46,7 @@ fn prose_text(content_type: &str, content: &str) -> Option<String> {
 /// Env-style settings parsed from a row's prose body. Notes parse their
 /// `text`; anything else (and any unparseable content) has none.
 pub fn note_settings(content_type: &str, content: &str) -> Settings {
-    match prose_text(content_type, content) {
-        // list and search call this for every cached row: skip the prose they
-        // never show
-        None => Settings::new(),
-        Some(text) => note_env::scan_note(&text, false).settings,
-    }
+    settings_from(content_type, &parse_content(content))
 }
 
 /// Full scan of a row's prose body — settings, comments, and the skipped
@@ -67,10 +62,37 @@ pub fn note_scan(content_type: &str, content: &str) -> NoteScan {
 /// Standard Notes keeps trashed notes in the account with `trashed: true` on
 /// the decrypted content.
 pub fn is_trashed(content: &str) -> bool {
-    serde_json::from_str::<Value>(content)
-        .ok()
-        .and_then(|parsed| parsed.get("trashed").and_then(Value::as_bool))
-        .unwrap_or(false)
+    trashed_from(&parse_content(content))
+}
+
+/// The content JSON parsed once per row; the per-row helpers read the value.
+/// Unparseable content reads as an empty object everywhere — the same
+/// defaults the string-level helpers produced by tolerating parse errors.
+fn parse_content(content: &str) -> Value {
+    serde_json::from_str(content).unwrap_or(Value::Null)
+}
+
+fn trashed_from(parsed: &Value) -> bool {
+    parsed.get("trashed").and_then(Value::as_bool).unwrap_or(false)
+}
+
+/// Env-style settings parsed from an already-parsed content body. Notes parse
+/// their `text`; anything else (and anything without one) has none.
+fn settings_from(content_type: &str, parsed: &Value) -> Settings {
+    if !PROSE_TYPES.contains(&content_type) {
+        return Settings::new();
+    }
+    match parsed.get("text").and_then(Value::as_str) {
+        // list and search call this for every cached row: skip the prose they
+        // never show
+        None => Settings::new(),
+        Some(text) => note_env::scan_note(text, false).settings,
+    }
+}
+
+/// The five columns the reading queries share, mapped by index once.
+fn content_row(row: &rusqlite::Row<'_>) -> rusqlite::Result<(String, String, i64, Option<String>, String)> {
+    Ok((row.get(0)?, row.get(1)?, row.get(2)?, row.get(3)?, row.get(4)?))
 }
 
 #[derive(Debug, Clone, Copy, Default)]
@@ -104,16 +126,14 @@ pub fn list_notes(db: &CacheDb, options: ListOptions<'_>) -> Result<Vec<ListedNo
          ORDER BY updated_at DESC",
         clauses.join(" AND ")
     ))?;
-    let rows = statement
-        .query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, i64>(2)?, row.get::<_, Option<String>>(3)?, row.get::<_, String>(4)?))
-        })
-        .map_err(db_error)?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(db_error)?;
+    // Rows stream lazily so the limit stops the scan — a 2,000-note cache
+    // never materializes behind `limit 100`.
+    let rows = statement.query_map([], content_row).map_err(db_error)?;
     let mut listed = Vec::new();
-    for (uuid, content_type, updated_at, title, content) in rows {
-        if is_trashed(&content) {
+    for row in rows {
+        let (uuid, content_type, updated_at, title, content) = row.map_err(db_error)?;
+        let parsed = parse_content(&content);
+        if trashed_from(&parsed) {
             continue;
         }
         if let Some(tag_uuids) = options.tag_uuids
@@ -121,7 +141,7 @@ pub fn list_notes(db: &CacheDb, options: ListOptions<'_>) -> Result<Vec<ListedNo
         {
             continue;
         }
-        let settings = note_settings(&content_type, &content).len();
+        let settings = settings_from(&content_type, &parsed).len();
         // env view: the limit applies after filtering, so prose-only notes
         // never crowd out a settings note
         if options.env && settings == 0 {
@@ -181,16 +201,13 @@ pub fn search_notes(db: &CacheDb, query: &str, options: ListOptions<'_>) -> Resu
          WHERE deleted = 0
          ORDER BY updated_at DESC",
     )?;
-    let rows = statement
-        .query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, i64>(2)?, row.get::<_, Option<String>>(3)?, row.get::<_, String>(4)?))
-        })
-        .map_err(|error| UserError::from(db_error(error)))?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| UserError::from(db_error(error)))?;
+    let rows = statement.query_map([], content_row).map_err(|error| UserError::from(db_error(error)))?;
     let mut hits = Vec::new();
-    for (uuid, content_type, updated_at, title, content) in rows {
-        if is_trashed(&content) {
+    for row in rows {
+        let (uuid, content_type, updated_at, title, content) =
+            row.map_err(|error| UserError::from(db_error(error)))?;
+        let parsed = parse_content(&content);
+        if trashed_from(&parsed) {
             continue;
         }
         if !visible_types.contains(&content_type.as_str()) {
@@ -213,7 +230,7 @@ pub fn search_notes(db: &CacheDb, query: &str, options: ListOptions<'_>) -> Resu
                 updated_at: row.2,
                 title: if title.is_empty() { label(&row.1) } else { title },
                 trashed: false,
-                settings: note_settings(&row.1, &row.5).len(),
+                settings: settings_from(&row.1, &parsed).len(),
             },
             snippet: snippet(&snippet_source(&row), pattern.as_ref(), &needle),
         };
@@ -338,11 +355,17 @@ fn ambiguous_items<T: Clone>(matches: &[&T], kind: &str, key: &dyn Fn(&T) -> (St
     ))
 }
 
-fn json_string(value: &str) -> String {
+pub(crate) fn json_string(value: &str) -> String {
     serde_json::to_string(value).expect("string serialization is infallible")
 }
 
 pub fn resolve_note(db: &CacheDb, query: &str, all: bool) -> Result<ItemRow, UserError> {
+    // A full-uuid query is a primary-key lookup; only when the exact row is
+    // absent or invisible does the prefix scan run — the same passes, and the
+    // same ambiguity errors, as before.
+    if let Some(row) = exact_visible_note(db, query, all)? {
+        return Ok(row);
+    }
     let mut statement = db
         .prepare("SELECT uuid, content_type, updated_at, deleted, title, content FROM items WHERE deleted = 0")
         .map_err(|error| UserError(error.to_string()))?;
@@ -367,6 +390,34 @@ pub fn resolve_note(db: &CacheDb, query: &str, all: bool) -> Result<ItemRow, Use
         "note",
         |row: &ItemRow| (row.0.clone(), row.4.clone().unwrap_or_else(|| "(untitled)".into())),
     )
+}
+
+/// The exact-uuid pass of `resolve_by_prefix` as a point query. None when the
+/// uuid is not in the cache, or when it is there but invisible to the current
+/// selector (wrong type for `all`, trashed) — the scan then decides.
+fn exact_visible_note(db: &CacheDb, query: &str, all: bool) -> Result<Option<ItemRow>, UserError> {
+    use rusqlite::OptionalExtension as _;
+    let mut statement = db
+        .prepare("SELECT uuid, content_type, updated_at, deleted, title, content FROM items WHERE deleted = 0 AND uuid = ?1")
+        .map_err(|error| UserError(error.to_string()))?;
+    let row = statement
+        .query_row([query], |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, i64>(2)?, row.get::<_, i64>(3)?, row.get::<_, Option<String>>(4)?, row.get::<_, String>(5)?))
+        })
+        .optional()
+        .map_err(|error| UserError(error.to_string()))?;
+    let Some(row) = row else {
+        return Ok(None);
+    };
+    let mut visible_types = vec!["Note"];
+    if all {
+        visible_types.extend(HIDDEN_TYPES);
+    }
+    if visible_types.contains(&row.1.as_str()) && !is_trashed(&row.5) {
+        Ok(Some(row))
+    } else {
+        Ok(None)
+    }
 }
 
 /// Tag→note and tag→parent links live in the encrypted content's references
@@ -517,6 +568,7 @@ pub fn resolve_parents(links: &TagLinks) -> HashMap<String, Option<String>> {
         let title_of = |uuid: &String| links.title_of.get(uuid).map(String::as_str).unwrap_or("");
         locale_cmp(title_of(a), title_of(b)).then_with(|| locale_cmp(a, b))
     };
+    let empty: HashSet<String> = HashSet::new();
     let mut parent_of: HashMap<String, Option<String>> = HashMap::new();
     for tag in &tags {
         let explicit = links.parent_of.get(*tag).cloned().flatten();
@@ -528,7 +580,9 @@ pub fn resolve_parents(links: &TagLinks) -> HashMap<String, Option<String>> {
             parent_of.insert((*tag).clone(), Some(explicit));
             continue;
         }
-        let mine = links.tag_to_notes.get(*tag).cloned().unwrap_or_default();
+        // borrowed, not cloned: the naive clone per (tag, other) pair made a
+        // full graph build quadratic in tag count
+        let mine = links.tag_to_notes.get(*tag).unwrap_or(&empty);
         if mine.is_empty() {
             // a noteless tag stays top-level rather than nesting under
             // everything that contains the empty set
@@ -540,7 +594,7 @@ pub fn resolve_parents(links: &TagLinks) -> HashMap<String, Option<String>> {
             if *other == *tag {
                 continue;
             }
-            let theirs = links.tag_to_notes.get(*other).cloned().unwrap_or_default();
+            let theirs = links.tag_to_notes.get(*other).unwrap_or(&empty);
             if theirs.len() < mine.len() {
                 continue;
             }
@@ -599,39 +653,42 @@ fn depth(depth_of: &mut HashMap<String, i64>, parent_of: &HashMap<String, Option
 /// renders as one chain hanging off each of its members. `cycle_root` says
 /// which kind of root a tag is, so renderers can present cycles last.
 pub struct TagForest {
+    /// The map the forest was built from, owned so every method sees the
+    /// same one (callers used to re-pass it at each call).
+    pub parent_of: HashMap<String, Option<String>>,
     pub depth_of: HashMap<String, i64>,
     pub children_of: HashMap<String, Vec<String>>,
 }
 
 impl TagForest {
-    pub fn is_root(&self, parent_of: &HashMap<String, Option<String>>, tag: &str) -> bool {
-        let parent = match parent_of.get(tag) {
+    pub fn is_root(&self, tag: &str) -> bool {
+        let parent = match self.parent_of.get(tag) {
             Some(Some(parent)) => parent.clone(),
             _ => return true,
         };
-        if !parent_of.contains_key(&parent) {
+        if !self.parent_of.contains_key(&parent) {
             return true;
         }
         let mut current = Some(parent);
         let mut seen = HashSet::new();
         while let Some(candidate) = current {
-            if !parent_of.contains_key(&candidate) {
+            if !self.parent_of.contains_key(&candidate) {
                 break;
             }
             if candidate == tag {
                 return true; // the parent chain loops through this tag
             }
             seen.insert(candidate.clone());
-            current = parent_of.get(&candidate).cloned().flatten();
+            current = self.parent_of.get(&candidate).cloned().flatten();
         }
         false
     }
 
-    pub fn cycle_root(&self, parent_of: &HashMap<String, Option<String>>, tag: &str) -> bool {
-        if !self.is_root(parent_of, tag) {
+    pub fn cycle_root(&self, tag: &str) -> bool {
+        if !self.is_root(tag) {
             return false;
         }
-        matches!(parent_of.get(tag), Some(Some(parent)) if parent_of.contains_key(parent))
+        matches!(self.parent_of.get(tag), Some(Some(parent)) if self.parent_of.contains_key(parent))
     }
 }
 
@@ -645,15 +702,15 @@ pub fn tag_forest(parent_of: &HashMap<String, Option<String>>) -> TagForest {
         children_of.entry(parent.clone()).or_default().push(tag.clone());
     }
     let depth_of = tag_depths(parent_of);
-    TagForest { depth_of, children_of }
+    TagForest { parent_of: parent_of.clone(), depth_of, children_of }
 }
 
 /// Read-only view of tags: title, resolved parent tag, and note count.
 pub fn list_tags(db: &CacheDb) -> Result<Vec<ListedTag>, DbError> {
-    tags_of(&tag_graph(db)?)
+    Ok(tags_of(&tag_graph(db)?))
 }
 
-fn tags_of(graph: &TagGraph) -> Result<Vec<ListedTag>, DbError> {
+fn tags_of(graph: &TagGraph) -> Vec<ListedTag> {
     let mut tags: Vec<ListedTag> = graph
         .links
         .title_of
@@ -666,7 +723,7 @@ fn tags_of(graph: &TagGraph) -> Result<Vec<ListedTag>, DbError> {
         })
         .collect();
     tags.sort_by(|a, b| locale_cmp(&a.title, &b.title).then_with(|| locale_cmp(&a.uuid, &b.uuid)));
-    Ok(tags)
+    tags
 }
 
 /// Note uuids under a tag or folder: the subtree's membership, so
@@ -696,7 +753,7 @@ pub fn tagged_note_uuids(graph: &TagGraph, tag_uuid: &str) -> HashSet<String> {
 }
 
 pub fn resolve_tag(graph: &TagGraph, query: &str) -> Result<ListedTag, UserError> {
-    let tags = tags_of(graph).map_err(|error| UserError(error.to_string()))?;
+    let tags = tags_of(graph);
     resolve_by_prefix(&tags, query, "tag", |tag| (tag.uuid.clone(), tag.title.clone()))
 }
 
@@ -1048,9 +1105,11 @@ pub fn render_tag_groups(graph: &TagGraph, notes: &[ListedNote]) -> String {
             })
             .unwrap_or_default();
         let mut kids: Vec<String> = Vec::new();
-        for child in children_of.get(tag).cloned().unwrap_or_default() {
-            if let Some(child_block) = block(&child, depth + 1, context, emitted, row_indented) {
-                kids.extend(child_block);
+        if let Some(children) = children_of.get(tag) {
+            for child in children {
+                if let Some(child_block) = block(child, depth + 1, context, emitted, row_indented) {
+                    kids.extend(child_block);
+                }
             }
         }
         if rows.is_empty() && kids.is_empty() {
@@ -1067,7 +1126,7 @@ pub fn render_tag_groups(graph: &TagGraph, notes: &[ListedNote]) -> String {
     let mut roots: Vec<&String> = links.title_of.keys().collect();
     roots.sort_by(|a, b| by_title(a, b));
     for tag in roots {
-        if !forest.is_root(parent_of, tag) {
+        if !forest.is_root(tag) {
             continue;
         }
         let context = BlockContext { links, children_of: &children_of, placed: &placed, count_of: &count_of };
@@ -1099,13 +1158,14 @@ fn measure(
     count_of: &mut HashMap<String, usize>,
     tag: &str,
 ) -> usize {
+    let children = children_of.get(tag).map(Vec::as_slice).unwrap_or(&[]);
     let total = placed.get(tag).map(|rows| rows.len()).unwrap_or(0)
-        + children_of.get(tag).cloned().unwrap_or_default().iter().map(|child| measure(children_of, placed, count_of, child)).sum::<usize>();
+        + children.iter().map(|child| measure(children_of, placed, count_of, child)).sum::<usize>();
     count_of.insert(tag.to_string(), total);
     total
 }
 
-fn pad_end(text: &str, width: usize) -> String {
+pub(crate) fn pad_end(text: &str, width: usize) -> String {
     let len = text.chars().count();
     if len >= width {
         text.to_string()

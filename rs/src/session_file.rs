@@ -6,11 +6,11 @@
 //! native `enc1:` one (no dotenvx compatibility, by decision).
 
 use std::collections::HashMap;
-use std::path::Path;
 
+use crate::db::is_64_hex;
 use crate::errors::UserError;
 use crate::keychain;
-use crate::paths::{keys_path, session_path};
+use crate::paths::{keys_path, session_path, set_mode_600};
 use crate::session::{
     decrypt_value, encrypt_value, generate_keypair, parse_session_file, render_session_file,
     SessionPrivateKey, SessionPublicKey,
@@ -18,16 +18,6 @@ use crate::session::{
 use crate::sn_api::SessionSecrets;
 
 const PRIVATE_KEY_FIELD: &str = "SNS_SESSION_PRIVATE_KEY";
-
-fn set_mode_600(path: &Path) {
-    #[cfg(unix)]
-    {
-        use std::os::unix::fs::PermissionsExt;
-        let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
-    }
-    #[cfg(not(unix))]
-    let _ = path;
-}
 
 fn read_private_key_file() -> Option<String> {
     let text = std::fs::read_to_string(keys_path()).ok()?;
@@ -69,7 +59,7 @@ pub struct SaveOutcome {
 /// is recoverable (keychain or `.env.keys`), generate a fresh one otherwise,
 /// encrypt every field, and settle the private key's custody.
 pub fn save_session(secrets: &SessionSecrets) -> Result<SaveOutcome, UserError> {
-    if !(secrets.db_key.len() == 64 && secrets.db_key.chars().all(|c| c.is_ascii_hexdigit())) {
+    if !is_64_hex(&secrets.db_key) {
         return Err(UserError("refusing to store a database key that is not 64 hex characters".into()));
     }
     crate::paths::ensure_config_dir();
@@ -113,6 +103,15 @@ pub fn session_key_names() -> Vec<String> {
         return Vec::new();
     };
     parse_session_file(&text).map(|parsed| parsed.fields.iter().map(|(name, _)| name.clone()).collect()).unwrap_or_default()
+}
+
+/// `with_access`'s save hook: refreshed session secrets reach the same
+/// encrypted file (and keychain custody) as a login. One named policy shared
+/// by every caller, typed for the API layer.
+pub fn persist(next: &SessionSecrets) -> Result<(), crate::sn_api::ApiClientError> {
+    save_session(next)
+        .map(|_| ())
+        .map_err(|error| crate::sn_api::ApiClientError::User(error.to_string()))
 }
 
 /// `assertSessionKeyNames` — the first name outside the session contract,

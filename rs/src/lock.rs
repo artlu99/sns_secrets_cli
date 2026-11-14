@@ -7,6 +7,7 @@ use std::time::{Duration, SystemTime};
 
 use crate::errors::UserError;
 use crate::paths::lock_path;
+use crate::time::now_ms;
 
 const STALE_MS: u64 = 30 * 60 * 1000;
 
@@ -52,7 +53,7 @@ fn looks_like_sns(pid: i32) -> bool {
 
 fn age_stale(path: &Path) -> bool {
     match mtime_ms(path) {
-        Some(mtime) => now_ms().saturating_sub(mtime) > STALE_MS,
+        Some(mtime) => now_ms().saturating_sub(mtime as i64) > STALE_MS as i64,
         None => false,
     }
 }
@@ -76,7 +77,7 @@ fn lock_is_stale(path: &Path) -> bool {
         && ours().lock().expect("lock-token registry").contains(token)
     {
         return match mtime_ms(path) {
-            Some(mtime) => now_ms().saturating_sub(mtime) > STALE_MS,
+            Some(mtime) => now_ms().saturating_sub(mtime as i64) > STALE_MS as i64,
             None => false,
         };
     }
@@ -84,10 +85,6 @@ fn lock_is_stale(path: &Path) -> bool {
         return true;
     }
     age_stale(path)
-}
-
-fn now_ms() -> u64 {
-    SystemTime::now().duration_since(SystemTime::UNIX_EPOCH).map(|duration| duration.as_millis() as u64).unwrap_or(0)
 }
 
 /// Exclusive sync lock. A second sync waits, then fails with a clear
@@ -113,7 +110,7 @@ pub fn acquire_sync_lock(wait_ms: u64) -> Result<impl FnOnce(), UserError> {
                     }
                     continue;
                 }
-                if now_ms().saturating_sub(ms_since(started)) >= wait_ms {
+                if now_ms().saturating_sub(ms_since(started) as i64) >= wait_ms as i64 {
                     return Err(UserError(
                         "another sns sync is still running — wait for it to finish, then retry".into(),
                     ));

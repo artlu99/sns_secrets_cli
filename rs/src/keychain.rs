@@ -2,10 +2,9 @@
 //! the TS implementation shells out to (`security` on macOS,
 //! `secret-tool` on Linux), run with the scrubbed environment.
 
-use std::collections::HashMap;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
-use crate::env::scrubbed_env;
+use crate::env::{scrubbed_command, which};
 
 const SERVICE: &str = "sn_secrets_cli";
 const ACCOUNT: &str = "dotenvkey";
@@ -17,10 +16,8 @@ struct RunResult {
 }
 
 fn run(command: &str, args: &[&str], stdin: Option<&str>) -> Result<RunResult, String> {
-    let mut child = Command::new(command)
+    let mut child = scrubbed_command(command)
         .args(args)
-        .env_clear()
-        .envs(scrubbed_env())
         .stdin(Stdio::piped())
         .stdout(Stdio::piped())
         .stderr(Stdio::piped())
@@ -38,29 +35,6 @@ fn run(command: &str, args: &[&str], stdin: Option<&str>) -> Result<RunResult, S
         stdout: String::from_utf8_lossy(&output.stdout).into_owned(),
         stderr: String::from_utf8_lossy(&output.stderr).into_owned(),
     })
-}
-
-fn which(bin: &str) -> bool {
-    std::env::var("PATH").unwrap_or_default().split(':').any(|dir| {
-        let candidate = std::path::Path::new(dir).join(bin);
-        candidate.is_file() && candidate.is_executable_hint()
-    })
-}
-
-trait ExecutableHint {
-    fn is_executable_hint(&self) -> bool;
-}
-
-impl ExecutableHint for std::path::Path {
-    #[cfg(unix)]
-    fn is_executable_hint(&self) -> bool {
-        use std::os::unix::fs::PermissionsExt;
-        std::fs::metadata(self).map(|meta| meta.permissions().mode() & 0o111 != 0).unwrap_or(false)
-    }
-    #[cfg(not(unix))]
-    fn is_executable_hint(&self) -> bool {
-        self.is_file()
-    }
 }
 
 fn platform() -> &'static str {
@@ -112,9 +86,9 @@ fn strip_trailing_newline(text: &str) -> String {
 }
 
 pub fn keychain_get() -> Option<String> {
-    if !secret_service_available() {
-        return None;
-    }
+    // No availability probe here: a missing tool or a dead service fails the
+    // lookup below, which maps to None either way — the probe (a DBus round
+    // trip) would only add a second spawn to every cache-touching command.
     let result = match platform() {
         "darwin" => run("security", &["find-generic-password", "-s", SERVICE, "-a", ACCOUNT, "-w"], None).ok()?,
         _ => run("secret-tool", &["lookup", "service", SERVICE, "account", ACCOUNT], None).ok()?,
@@ -156,8 +130,3 @@ pub fn keychain_delete() {
         _ => run("secret-tool", &["clear", "service", SERVICE, "account", ACCOUNT], None),
     };
 }
-
-/// Silence an unused-import path when the scrubbed env map is only consumed
-/// through envs().
-#[allow(dead_code)]
-fn _env_witness(_env: &HashMap<String, String>) {}

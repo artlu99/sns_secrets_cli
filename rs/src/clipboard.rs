@@ -5,14 +5,15 @@
 use std::io::{IsTerminal as _, Write as _};
 #[cfg(unix)]
 use std::os::unix::process::CommandExt as _;
-use std::process::{Command, Stdio};
+use std::process::Stdio;
 
 use base64::engine::general_purpose::STANDARD as BASE64;
 use base64::Engine as _;
 
-use crate::env::scrubbed_env;
+use crate::env::{scrubbed_command, which};
 use crate::errors::UserError;
 use crate::paths::{clipboard_marker_path, ensure_config_dir};
+use crate::time::now_ms;
 
 const MAX_BYTES: usize = 60_000;
 
@@ -70,11 +71,9 @@ fn arm_clear(sequence: &str) {
         return;
     };
     let tty_fd = tty_file.as_raw_fd();
-    let mut command = std::process::Command::new("sh");
+    let mut command = scrubbed_command("sh");
     command
         .args(["-c", "sleep 30; printf %s \"$1\" >&3 || true", "sns-clear", sequence])
-        .env_clear()
-        .envs(scrubbed_env())
         .stdin(Stdio::null())
         .stdout(Stdio::null())
         .stderr(Stdio::null())
@@ -113,10 +112,8 @@ fn copy_via_tool(text: &str) -> bool {
         if !which(bin) {
             continue;
         }
-        let mut child = match Command::new(bin)
+        let mut child = match scrubbed_command(bin)
             .args(args)
-            .env_clear()
-            .envs(scrubbed_env())
             .stdin(Stdio::piped())
             .stdout(Stdio::null())
             .stderr(Stdio::null())
@@ -175,31 +172,9 @@ pub fn maybe_clear_stale_clipboard() {
     }
     let Ok(text) = std::fs::read_to_string(&path) else { return };
     let Ok(at) = text.parse::<i64>() else { return };
-    if now_ms() < at as u64 {
+    if now_ms() < at {
         return;
     }
     let _ = write_osc(&clear_sequence(tmux_active()));
     let _ = std::fs::remove_file(&path);
-}
-
-fn now_ms() -> u64 {
-    std::time::SystemTime::now().duration_since(std::time::SystemTime::UNIX_EPOCH).map(|d| d.as_millis() as u64).unwrap_or(0)
-}
-
-fn which(bin: &str) -> bool {
-    std::env::var("PATH").unwrap_or_default().split(':').any(|dir| {
-        let candidate = std::path::Path::new(dir).join(bin);
-        candidate.is_file()
-            && std::fs::metadata(&candidate)
-                .map(|meta| {
-                    #[cfg(unix)]
-                    {
-                        use std::os::unix::fs::PermissionsExt;
-                        meta.permissions().mode() & 0o111 != 0
-                    }
-                    #[cfg(not(unix))]
-                    true
-                })
-                .unwrap_or(false)
-    })
 }
