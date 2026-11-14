@@ -19,6 +19,7 @@
   --accent: #6ea1ff;
   --accent-strong: #4b86ff;
   --accent-soft: rgba(96, 148, 255, 0.14);
+  --accent-glow: rgba(75, 134, 255, 0.3);
   --ok: #3ecf8e;
   --err: #f47174;
   --font-sans: "Inter Variable", system-ui, -apple-system, "Segoe UI", sans-serif;
@@ -27,6 +28,28 @@
   --r-m: 9px;
   --r-l: 12px;
   --speed: 0.13s;
+}
+
+/* Follow the OS setting — same tokens, daylight palette. */
+@media (prefers-color-scheme: light) {
+  :root {
+    color-scheme: light;
+    --bg: #f6f7f9;
+    --surface: #ffffff;
+    --surface-2: #eef1f5;
+    --surface-3: #e4e8ee;
+    --line: rgba(23, 32, 56, 0.1);
+    --line-strong: rgba(23, 32, 56, 0.2);
+    --text: #161b26;
+    --text-2: #414960;
+    --dim: #6a7286;
+    --accent: #2e6be6;
+    --accent-strong: #1f56c7;
+    --accent-soft: rgba(46, 107, 230, 0.1);
+    --accent-glow: rgba(46, 107, 230, 0.2);
+    --ok: #0f8f5f;
+    --err: #c93d3d;
+  }
 }
 
 * {
@@ -126,7 +149,7 @@ button {
 }
 .primary:hover:not(:disabled) {
   filter: brightness(1.08);
-  box-shadow: 0 4px 14px rgba(75, 134, 255, 0.3);
+  box-shadow: 0 4px 14px var(--accent-glow);
 }
 .primary:active:not(:disabled) {
   transform: translateY(0.5px);

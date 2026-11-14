@@ -202,6 +202,11 @@ try {
   await dashboard.waitForTimeout(300);
   await dashboard.screenshot({ path: `${OUT_DIR}/dashboard-detail.png` });
 
+  // Light mode (system setting aware — emulate prefers-color-scheme).
+  await dashboard.emulateMedia({ colorScheme: "light" });
+  await dashboard.waitForTimeout(200);
+  await dashboard.screenshot({ path: `${OUT_DIR}/dashboard-light.png` });
+
   // Locked form.
   const gate = await context.newPage();
   await gate.setViewportSize({ width: 1440, height: 860 });
@@ -209,9 +214,12 @@ try {
   const popup = await context.newPage();
   await popup.setViewportSize({ width: 384, height: 580 });
   await popup.goto(`chrome-extension://${extId}/popup.html`);
-  await popup.waitForSelector(".hits, .unlock", { timeout: 10_000 });
+  await popup.waitForSelector(".search-wrap, .unlock", { timeout: 10_000 });
   await popup.waitForTimeout(400);
   await popup.screenshot({ path: `${OUT_DIR}/popup.png` });
+  await popup.emulateMedia({ colorScheme: "light" });
+  await popup.waitForTimeout(200);
+  await popup.screenshot({ path: `${OUT_DIR}/popup-light.png` });
   await gate.close();
 
   console.error("screenshots written to", OUT_DIR);

@@ -117,11 +117,13 @@ export function FolderIcon(props: IconProps) {
   );
 }
 
-export function ExternalIcon(props: IconProps) {
+export function LayoutIcon(props: IconProps) {
   return (
     <svg {...svgProps(props)}>
-      <path d="M7 3.5H4.4a1.4 1.4 0 0 0-1.4 1.4v7.2a1.4 1.4 0 0 0 1.4 1.4h7.2a1.4 1.4 0 0 0 1.4-1.4V9.3" />
-      <path d="M9.6 2.6h3.8v3.8M13.2 2.8 8.6 7.4" />
+      <rect x="2.25" y="2.25" width="5" height="5" rx="1.2" />
+      <rect x="8.75" y="2.25" width="5" height="5" rx="1.2" />
+      <rect x="2.25" y="8.75" width="5" height="5" rx="1.2" />
+      <rect x="8.75" y="8.75" width="5" height="5" rx="1.2" />
     </svg>
   );
 }

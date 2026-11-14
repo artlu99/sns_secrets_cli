@@ -4,8 +4,8 @@ import {
   CheckIcon,
   CopyIcon,
   EmptyVaultIcon,
-  ExternalIcon,
   KeyIcon,
+  LayoutIcon,
   LockIcon,
   SearchIcon,
 } from "../../components/icons.tsx";
@@ -187,8 +187,14 @@ export default function App() {
         <span className="brand-mark"><KeyIcon size={14} /></span>
         <span className="brand-name">sns vault</span>
         <span className="spacer" />
-        <button className="icon-btn" type="button" title="Open dashboard" onClick={() => openDashboard()}>
-          <ExternalIcon size={15} />
+        <button
+          className="ghost"
+          type="button"
+          title="Open the full dashboard in a tab"
+          onClick={() => openDashboard()}
+        >
+          <LayoutIcon size={13} />
+          dashboard
         </button>
         <button className="icon-btn" type="button" title="Lock now" onClick={() => void lock()}>
           <LockIcon size={15} />
