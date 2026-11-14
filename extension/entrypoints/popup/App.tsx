@@ -24,7 +24,7 @@ export default function App() {
   const [session, setSession] = useState<VaultSession | null>(null);
   const [view, setView] = useState<VaultView | null>(null);
   const [query, setQuery] = useState("");
-  const [copied, setCopied] = useState<KeyHit | null>(null);
+  const [copied, setCopied] = useState<string | null>(null);
   const copyTimer = useRef<number | null>(null);
   const mfaResolver = useRef<((code: string) => void) | null>(null);
 
@@ -102,10 +102,10 @@ export default function App() {
   }
 
   function copyValue(hit: KeyHit): void {
-    void copySecret(hit.value).then(() => {
-      setCopied(hit);
+    void copySecret(hit.value).then((schedule) => {
+      setCopied(schedule === "scheduled" ? `${hit.noteUuid}:${hit.key}:30s` : `${hit.noteUuid}:${hit.key}:!30s`);
       if (copyTimer.current !== null) window.clearTimeout(copyTimer.current);
-      copyTimer.current = window.setTimeout(() => setCopied(null), 1500);
+      copyTimer.current = window.setTimeout(() => setCopied(null), 2500);
     });
   }
 
@@ -193,7 +193,13 @@ export default function App() {
             >
               <span className="hit-key">{hit.key}</span>
               <span className="hit-note">{hit.noteTitle}</span>
-              <span className="hit-action">{copied === hit ? "copied ✓" : "copy"}</span>
+              <span className="hit-action">
+                {copied === `${hit.noteUuid}:${hit.key}:30s`
+                  ? "copied ✓ blanks in 30s"
+                  : copied === `${hit.noteUuid}:${hit.key}:!30s`
+                    ? "copied ✓ — clear NOT scheduled"
+                    : "copy"}
+              </span>
             </button>
           </li>
         ))}

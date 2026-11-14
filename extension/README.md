@@ -27,12 +27,17 @@ print **Finished**, then Reload.
   inferred the same way `sns list` does it), notes in the middle, and the
   per-key inventory on the right with show/hide and copy. Prose is rendered
   with assignment-shaped fragments redacted, exactly like `sns show`.
-- **Clipboard auto-clear**: every copy schedules an overwrite with an empty
-  value after 30 seconds. The timer lives in an offscreen document (popups
-  die on focus loss; the MV3 service worker sleeps), so it fires even after
-  the popup closes. Copying again restarts the 30 s; the offscreen page exits
-  once the clear fires. Browsers cannot *clear* the clipboard — only
-  overwrite it — so anything you copy yourself in those 30 s gets replaced.
+- **Clipboard auto-clear**: every copy schedules an overwrite after 30
+  seconds. The timer lives in an offscreen document — the only context that
+  can host it (popups die on focus loss; the MV3 service worker sleeps; and
+  offscreen documents get no extension APIs beyond runtime messaging, so the
+  schedule travels as a message or baked into the document's creation URL,
+  with the arm acknowledged). Copying again restarts the 30 s; the offscreen
+  page exits once the clear fires. Browsers cannot *clear* the clipboard,
+  only overwrite it — and some refuse an empty write entirely, so the
+  fallback overwrites with a single space: pasting after the clear yields a
+  space, never the secret. `bun scripts/e2e-clipboard.ts` verifies the whole
+  chain in a headless Chromium.
 
 ## Security model
 
@@ -80,3 +85,9 @@ cursor exhausts. The tag graph reuses `resolveParents`/`tagForest` from
 - Store listing (unpacked loading is per-browser).
 - Optional: encrypted-at-rest cache via IndexedDB for instant reopen across
   browser restarts (password re-entry per session would still be required).
+- Idle auto-lock: the unlocked dashboard currently stays unlocked until the
+  lock button or browser exit. Reset a timer on user activity and call
+  `lockVault()` on expiry, so both surfaces re-gate.
+- Lock on hidden: lock when the dashboard tab has been hidden
+  (`visibilitychange`) for a few minutes — stricter than idle-lock, since a
+  hidden vault tab usually means walked away.

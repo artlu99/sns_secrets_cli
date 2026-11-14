@@ -88,7 +88,7 @@ The cache key is random. The account password cannot reopen `cache.db`. One key 
 
 ## Browser extension
 
-A companion Chrome extension lives in [extension/](extension/): the same vault, next to the browser. A popup searches every KEY across every note and copies the value on click; a full-page dashboard draws the tag tree — the same nesting rules `sns list` infers — and a per-key inventory with values masked until you reveal them. Prose is masked under the same redaction rules as `sns show`, so no value renders where you did not ask for one. Copies blank the clipboard after 30 seconds.
+A companion Chrome extension lives in [extension/](extension/): the same vault, next to the browser. A popup searches every KEY across every note and copies the value on click; a full-page dashboard draws the tag tree — the same nesting rules `sns list` infers — and a per-key inventory with values masked until you reveal them. Prose is masked under the same redaction rules as `sns show`, so no value renders where you did not ask for one. Copies blank the clipboard after 30 seconds (when the browser refuses an empty write, the fallback overwrites with a single space — pasting after the clear yields a space, never the secret).
 
 All cryptography runs in the extension: Argon2id key derivation (the server's own parameters) and XChaCha20-Poly1305 decryption, with libsodium's WASM. The master key and session tokens live in memory-only session storage — nothing secret touches disk, and locking or exiting the browser clears them. The extension never injects into web pages; its only network traffic is to the Standard Notes API. Read-only for now — editing notes is v2. The full security model and setup are in [extension/README.md](extension/README.md).
 

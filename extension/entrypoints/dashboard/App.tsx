@@ -30,7 +30,7 @@ export default function App() {
   const [noteUuid, setNoteUuid] = useState<string | null>(null);
   const [query, setQuery] = useState("");
   const [revealed, setRevealed] = useState<Set<string>>(new Set());
-  const [copied, setCopied] = useState<string | null>(null);
+  const [copied, setCopied] = useState<{ label: string; scheduled: boolean } | null>(null);
   const [syncedAt, setSyncedAt] = useState<number | null>(null);
   const [syncing, setSyncing] = useState(false);
   const copyTimer = useRef<number | null>(null);
@@ -113,10 +113,10 @@ export default function App() {
   }
 
   function copy(label: string, text: string): void {
-    void copySecret(text).then(() => {
-      setCopied(label);
+    void copySecret(text).then((schedule) => {
+      setCopied({ label, scheduled: schedule === "scheduled" });
       if (copyTimer.current !== null) window.clearTimeout(copyTimer.current);
-      copyTimer.current = window.setTimeout(() => setCopied(null), 1500);
+      copyTimer.current = window.setTimeout(() => setCopied(null), 2500);
     });
   }
 
@@ -271,6 +271,11 @@ export default function App() {
           {selectedRow && scan ? (
             <>
               <h2 className="detail-title">{selectedRow.title ?? "(untitled)"}</h2>
+              {view.displayProse(scan).trim() !== "" ? (
+                <section className="prose">
+                  <pre>{view.displayProse(scan)}</pre>
+                </section>
+              ) : null}
               {keys.length > 0 ? (
                 <table className="keys">
                   <tbody>
@@ -297,7 +302,11 @@ export default function App() {
                               type="button"
                               onClick={() => copy(`${selectedRow.uuid}:${entry.key}`, entry.value)}
                             >
-                              {copied === `${selectedRow.uuid}:${entry.key}` ? "copied ✓" : "copy"}
+                              {copied?.label === `${selectedRow.uuid}:${entry.key}`
+                                ? copied.scheduled
+                                  ? "copied ✓ blanks in 30s"
+                                  : "copied ✓ — clear NOT scheduled"
+                                : "copy"}
                             </button>
                           </td>
                         </tr>
@@ -308,15 +317,13 @@ export default function App() {
               ) : (
                 <p className="hint">No KEY=VALUE settings in this note.</p>
               )}
-              {view.displayProse(scan).trim() !== "" ? (
-                <details className="prose" open={keys.length === 0}>
-                  <summary>prose</summary>
-                  <pre>{view.displayProse(scan)}</pre>
-                </details>
-              ) : null}
               <div className="detail-actions">
                 <button className="ghost" type="button" onClick={() => copy(`${selectedRow.uuid}:body`, body)}>
-                  {copied === `${selectedRow.uuid}:body` ? "copied ✓" : "copy whole body"}
+                  {copied?.label === `${selectedRow.uuid}:body`
+                    ? copied.scheduled
+                      ? "copied ✓ blanks in 30s"
+                      : "copied ✓ — clear NOT scheduled"
+                    : "copy whole body"}
                 </button>
               </div>
             </>

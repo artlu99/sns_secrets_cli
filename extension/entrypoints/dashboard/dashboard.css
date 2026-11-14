@@ -140,8 +140,7 @@ body {
 .ghost:hover { background: var(--panel-2); }
 .ghost:disabled { opacity: 0.5; cursor: default; }
 
-.prose { margin-top: 14px; }
-.prose summary { color: var(--dim); cursor: pointer; }
+.prose { margin: 0 0 14px; }
 .prose pre {
   background: var(--panel);
   border: 1px solid var(--border);
