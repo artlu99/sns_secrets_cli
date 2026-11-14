@@ -82,19 +82,18 @@ pub fn updated_at_ms(item: &EncryptedItem) -> i64 {
     }
 }
 
+/// What Date.parse accepts in practice: RFC 3339, a space instead of `T`,
+/// and bare dates as UTC midnight.
 fn parse_datetime_ms(text: &str) -> Option<i64> {
-    if let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(text) {
-        return Some(parsed.timestamp_millis());
+    if let Ok(timestamp) = text.parse::<jiff::Timestamp>() {
+        return Some(timestamp.as_millisecond());
     }
-    // Date.parse also accepts a space instead of `T` and bare dates (as UTC
-    // midnight); cover those rather than storing 0 forever.
-    if let Ok(parsed) = chrono::DateTime::parse_from_rfc3339(&text.replacen(' ', "T", 1)) {
-        return Some(parsed.timestamp_millis());
+    if let Ok(timestamp) = text.replacen(' ', "T", 1).parse::<jiff::Timestamp>() {
+        return Some(timestamp.as_millisecond());
     }
-    chrono::NaiveDate::parse_from_str(text, "%Y-%m-%d")
-        .ok()
-        .and_then(|date| date.and_hms_opt(0, 0, 0))
-        .map(|midnight| midnight.and_utc().timestamp_millis())
+    let date = text.parse::<jiff::civil::Date>().ok()?;
+    let midnight = date.to_zoned(jiff::tz::TimeZone::UTC).ok()?;
+    Some(midnight.timestamp().as_millisecond())
 }
 
 fn title_from_content(content_type: &str, content: &str) -> Option<String> {
@@ -398,7 +397,6 @@ mod tests {
         master: String,
         items: Vec<EncryptedItem>,
         note_id: String,
-        tag_id: String,
     }
 
     /// The TS test's fixture: one items key wrapping a note and a tag, plus
@@ -481,7 +479,7 @@ mod tests {
                 updated_at_timestamp: Some(4_000.0),
             },
         ];
-        Fixture { master, items, note_id, tag_id }
+        Fixture { master, items, note_id }
     }
 
     fn fresh_db(tag: &str) -> (CacheDb, std::path::PathBuf) {

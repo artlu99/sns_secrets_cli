@@ -185,8 +185,9 @@ CREATE TABLE IF NOT EXISTS sync_state (
 ";
 
 impl CacheDb {
-    /// TS `db.close()` — drop the connection, releasing the file lock.
-    pub fn close(self) {}
+    /// TS `db.close()` — releases the file lock (fully on Drop, which runs
+    /// when the last reference to this CacheDb goes away).
+    pub fn close(&self) {}
 
     /// `db.exec` / `db.run` — one statement or batch, no rows.
     pub fn conn_execute(&self, sql: &str) -> Result<(), DbError> {

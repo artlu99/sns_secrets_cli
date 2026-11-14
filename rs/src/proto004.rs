@@ -115,12 +115,30 @@ impl core::fmt::Display for Proto004Error {
 impl std::error::Error for Proto004Error {}
 
 /// Canonical JSON: object keys sorted recursively, everything else as
-/// `JSON.stringify` renders it. serde_json's map is a BTreeMap, so plain
-/// serialization emits keys in sorted order; escaping matches JSON.stringify
-/// for the string shapes Standard Notes puts in authenticated data (uuids,
-/// versions, identifiers).
+/// `JSON.stringify` renders it — the TS module sorts `Object.keys` and
+/// re-builds; here the same walk sorts the serde map (which, with the
+/// `preserve_order` feature, keeps insertion order and must be sorted by
+/// hand). Escaping matches JSON.stringify for the string shapes Standard
+/// Notes puts in authenticated data (uuids, versions, identifiers).
 pub fn canonical_json(value: &Value) -> String {
-    serde_json::to_string(value).expect("serializing a Value is infallible")
+    let sorted = sort_keys(value);
+    serde_json::to_string(&sorted).expect("serializing a Value is infallible")
+}
+
+fn sort_keys(value: &Value) -> Value {
+    match value {
+        Value::Object(map) => {
+            let mut keys: Vec<&String> = map.keys().collect();
+            keys.sort();
+            let mut sorted = serde_json::Map::new();
+            for key in keys {
+                sorted.insert(key.clone(), sort_keys(&map[key]));
+            }
+            Value::Object(sorted)
+        }
+        Value::Array(array) => Value::Array(array.iter().map(sort_keys).collect()),
+        other => other.clone(),
+    }
 }
 
 /// The AEAD's associated data: base64 of the canonical JSON.
