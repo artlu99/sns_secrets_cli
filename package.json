@@ -17,7 +17,8 @@
     "start": "bun src/index.ts"
   },
   "devDependencies": {
-    "@types/bun": "latest"
+    "@types/bun": "latest",
+    "playwright": "^1.65.1"
   },
   "peerDependencies": {
     "typescript": "^7"
