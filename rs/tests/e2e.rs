@@ -53,6 +53,15 @@ fn the_binary_drives_a_crafted_session_end_to_end() {
     assert!(!stored.keychain);
     assert!(session_path().exists());
     assert!(sns::paths::keys_path().exists());
+    // Secrets-bearing files are 0600 from creation — no readable window.
+    #[cfg(unix)]
+    {
+        use std::os::unix::fs::PermissionsExt;
+        for path in [session_path(), sns::paths::keys_path()] {
+            let mode = std::fs::metadata(&path).expect("secret file exists").permissions().mode();
+            assert_eq!(mode & 0o777, 0o600, "{} must be 0600", path.display());
+        }
+    }
     std::fs::write(env_path(), "SN_EMAIL=e2e@example.test\nSN_API_URL=https://api.standardnotes.com\n")
         .expect("plain config writes");
 

@@ -723,6 +723,30 @@ fn search_matches_full_content_but_the_snippet_never_carries_a_value() {
     assert!(by_prose[0].snippet.contains("staging notes here"));
 }
 
+/// The snippet window is char-indexed: a match offset from multi-byte text
+/// (a byte offset under the hood) must not push the window off the end. 40
+/// CJK characters put the byte offset ~3× past the char offset.
+#[test]
+fn the_snippet_window_survives_multi_byte_text() {
+    let temp = temp_db("snippet-cjk");
+    let prefix = "性能测试笔记".repeat(8);
+    temp.0.upsert_items(
+        &[note(
+            "ffffffff-1111-1111-1111-111111111111",
+            2_000,
+            "CJK",
+            json(serde_json::json!({
+                "title": "CJK",
+                "text": format!("{prefix}\nthe deploy keyword lives here after the CJK block")
+            })),
+        )],
+    )
+    .expect("seed");
+    let hits = search_notes(&temp.0, "deploy keyword", plain()).expect("search");
+    assert_eq!(hits.len(), 1);
+    assert!(hits[0].snippet.contains("deploy keyword lives here"), "snippet: {}", hits[0].snippet);
+}
+
 #[test]
 fn inventory_text_renders_a_keyless_note_as_masked_prose_the_only_view_there_is() {
     let temp = temp_db("inventory");

@@ -244,9 +244,16 @@ pub fn search_notes(db: &CacheDb, query: &str, options: ListOptions<'_>) -> Resu
 
 fn snippet(haystack: &str, pattern: Option<&FancyRegex>, needle: &str) -> String {
     let flat = whitespace_collapse(haystack);
+    // `index` is a CHAR offset into flat: find() returns a byte offset, which
+    // only doubles as a char index on ASCII. The lowercased copy indexes flat
+    // 1:1 wherever lowercasing preserves the character count — the same
+    // residual drift the TS lowercase-indexOf carries.
     let index: Option<usize> = match pattern {
-        Some(pattern) => pattern.find(&flat).ok().flatten().map(|match_| match_.start()),
-        None => flat.to_lowercase().find(needle),
+        Some(pattern) => pattern.find(&flat).ok().flatten().map(|match_| flat[..match_.start()].chars().count()),
+        None => {
+            let lowered = flat.to_lowercase();
+            lowered.find(needle).map(|byte| lowered[..byte].chars().count())
+        }
     };
     let Some(index) = index else {
         return flat.chars().take(80).collect();

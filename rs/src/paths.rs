@@ -90,6 +90,24 @@ pub(crate) fn set_mode_600(path: &Path) {
     let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
 }
 
+/// Write a secrets-bearing file with mode 0600 at creation: the mode is set
+/// before the first byte lands, so there is no window in which the content
+/// (the session key, the session fields) is readable by other users. A
+/// pre-existing file keeps its mode through the write; `set_mode_600`
+/// tightens it afterwards.
+#[cfg(unix)]
+pub(crate) fn write_secret_file(path: &Path, contents: &str) -> std::io::Result<()> {
+    use std::io::Write as _;
+    use std::os::unix::fs::OpenOptionsExt;
+    let mut file = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(path)?;
+    file.write_all(contents.as_bytes())
+}
+
+#[cfg(not(unix))]
+pub(crate) fn write_secret_file(path: &Path, contents: &str) -> std::io::Result<()> {
+    std::fs::write(path, contents)
+}
+
 #[cfg(not(unix))]
 fn set_mode_700(_path: &Path) {}
 #[cfg(not(unix))]

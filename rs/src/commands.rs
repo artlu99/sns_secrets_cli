@@ -21,7 +21,7 @@ use crate::notes::{
     search_notes, tag_graph, tagged_note_uuids, CopyPlan, ListOptions, ListedNote, ListedTag,
     PROSE_TYPES,
 };
-use crate::pager::{page_if_tall, PageOptions};
+use crate::pager::{page_if_tall, write_stdout, PageOptions};
 use crate::paths::{
     config_dir, db_path, ensure_config_dir, env_path, read_plain_config, session_path,
     unexpected_config_files, write_plain_config,
@@ -702,8 +702,10 @@ pub fn search_command(query: &str, regex: bool, limit: usize, all: bool) -> Resu
         query,
         ListOptions { regex, limit, all, tag_uuids: None, env: false, kind: None },
     )?;
+    // stdout, not println!: a closed pipe (search | head) is done, not a
+    // panic — the same rule the list/show/tags output follows.
     if hits.is_empty() {
-        println!("no matches");
+        write_stdout("no matches\n");
         return Ok(());
     }
     let lines: Vec<String> = hits
@@ -718,7 +720,7 @@ pub fn search_command(query: &str, regex: bool, limit: usize, all: bool) -> Resu
             )
         })
         .collect();
-    println!("{}", lines.join("\n"));
+    write_stdout(&format!("{}\n", lines.join("\n")));
     Ok(())
 }
 

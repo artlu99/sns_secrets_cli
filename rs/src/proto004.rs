@@ -20,56 +20,63 @@ pub const ITEMS_KEY_TYPE: &str = "SN|ItemsKey";
 const NONCE_BYTES: usize = 24;
 const KEY_BYTES: usize = 32;
 
-/// Lenient `Option<bool>`: the server has sent booleans and 0/1 integers.
+/// Lenient `Option<bool>`: the server has sent booleans, 0/1 integers, and
+/// spelled strings. An unrecognized spelling parses as None — the sync engine
+/// then treats the item as live, exactly how the TS `deleted === true` check
+/// treats it. An error here would drop the whole item from the page while the
+/// sync token still advanced.
 fn deserialize_opt_bool<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Option<bool>, D::Error> {
     let value = Option::<Value>::deserialize(deserializer)?;
     match value {
         None | Some(Value::Null) => Ok(None),
         Some(Value::Bool(flag)) => Ok(Some(flag)),
-        Some(Value::Number(ref number)) => number
-            .as_i64()
-            .map(|as_int| Some(as_int != 0))
-            .ok_or_else(|| serde::de::Error::custom("expected a boolean or an integer")),
-        Some(Value::String(text)) => match text.as_str() {
+        Some(Value::Number(ref number)) => Ok(number.as_i64().map(|as_int| as_int != 0)),
+        Some(Value::String(text)) => match text.to_lowercase().as_str() {
             "true" => Ok(Some(true)),
             "false" => Ok(Some(false)),
-            other => {
-                let as_int: i64 = other
-                    .parse()
-                    .map_err(|_| serde::de::Error::custom("expected a boolean or an integer"))?;
-                Ok(Some(as_int != 0))
-            }
+            other => Ok(other.parse::<i64>().ok().map(|as_int| as_int != 0)),
         },
-        Some(_) => Err(serde::de::Error::custom("expected a boolean or an integer")),
+        Some(_) => Ok(None),
     }
 }
 
 /// Lenient `Option<f64>` — timestamps arrive as integers, floats, or strings;
-/// the fraction is kept so `to_unix_ms` can round like Math.round does.
+/// the fraction is kept so `to_unix_ms` can round like Math.round does. An
+/// unparsable spelling parses as None (the timestamp falls back to 0), never
+/// an error: one weird field must not drop the item from the page.
 fn deserialize_opt_f64<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<Option<f64>, D::Error> {
     let value = Option::<Value>::deserialize(deserializer)?;
     match value {
         None | Some(Value::Null) => Ok(None),
-        Some(Value::Number(ref number)) => number
-            .as_f64()
-            .map(Some)
-            .ok_or_else(|| serde::de::Error::custom("expected a number")),
-        Some(Value::String(text)) => text
-            .trim()
-            .parse::<f64>()
-            .map(Some)
-            .map_err(|_| serde::de::Error::custom("expected a number")),
-        Some(_) => Err(serde::de::Error::custom("expected a number")),
+        Some(Value::Number(ref number)) => Ok(number.as_f64()),
+        Some(Value::String(text)) => Ok(text.trim().parse::<f64>().ok()),
+        Some(_) => Ok(None),
+    }
+}
+
+/// Lenient `String` for uuid and content_type: a missing or non-string field
+/// parses as empty, which the sync engine already skips (empty uuid → skip;
+/// unknown content_type → not a stored type). Failing the item here instead
+/// would advance the sync token past data it never decrypted — the exact
+/// silent-loss mode this module's leniency exists to prevent.
+fn deserialize_lenient_string<'de, D: serde::Deserializer<'de>>(deserializer: D) -> Result<String, D::Error> {
+    let value = Option::<Value>::deserialize(deserializer)?;
+    match value {
+        Some(Value::String(text)) => Ok(text),
+        _ => Ok(String::new()),
     }
 }
 
 /// The wire shape of a synced item (`src/sn-crypto/004.ts`'s `EncryptedItem`).
 /// Deserialization is deliberately lenient: a strict parse would silently
 /// drop live notes or tombstones from a sync page while the sync token still
-/// advanced, so every server-side spelling of a field must parse.
-#[derive(Debug, Clone, PartialEq, serde::Serialize, serde::Deserialize)]
+/// advanced, so every field parses under every server-side spelling. With
+/// that, deserialization itself cannot fail on a JSON object.
+#[derive(Debug, Clone, Default, PartialEq, serde::Serialize, serde::Deserialize)]
 pub struct EncryptedItem {
+    #[serde(default, deserialize_with = "deserialize_lenient_string")]
     pub uuid: String,
+    #[serde(default, deserialize_with = "deserialize_lenient_string")]
     pub content_type: String,
     #[serde(default, skip_serializing_if = "Option::is_none")]
     pub content: Option<String>,

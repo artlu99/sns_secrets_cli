@@ -268,13 +268,17 @@ pub struct SyncPage {
 
 pub fn parse_sync_page(body: &Value) -> SyncPage {
     let data = unwrapped(body);
+    // Nothing is dropped here — an entry that is not even an object parses
+    // as an all-default item (empty uuid), which the sync engine skips and
+    // counts. A filter_map over `.ok()` would advance the sync token past an
+    // item it never saw.
     let items = data
         .get("retrieved_items")
         .and_then(Value::as_array)
         .map(|array| {
             array
                 .iter()
-                .filter_map(|item| EncryptedItem::deserialize(item).ok())
+                .map(|item| EncryptedItem::deserialize(item).unwrap_or_default())
                 .collect()
         })
         .unwrap_or_default();
@@ -696,6 +700,32 @@ mod tests {
         assert_eq!(page.items[1].deleted, Some(true));
         assert_eq!(page.items[2].deleted, Some(false));
         assert_eq!(page.items[2].updated_at, Some(json!(1700000000.5)));
+    }
+
+    /// No page item may ever be dropped at parse time: the sync token still
+    /// advances, so a dropped note is never pulled by this or any later
+    /// incremental sync. Malformed entries reach the engine, which skips and
+    /// counts them under its own rules.
+    #[test]
+    fn sync_page_never_drops_an_item_however_malformed() {
+        let body = json!({
+            "data": {
+                "retrieved_items": [
+                    { "uuid": "ok", "content_type": "Note", "deleted": "True" },
+                    { "content_type": "Note", "deleted": "yes" },
+                    { "uuid": "no-type", "deleted": 7 },
+                    "not even an object",
+                    { "uuid": 42, "content_type": ["Note"], "deleted": true }
+                ]
+            }
+        });
+        let page = parse_sync_page(&body);
+        assert_eq!(page.items.len(), 5, "every entry survives, none is silently dropped");
+        assert_eq!(page.items[0].deleted, Some(true), "capitalized spelling reads as true");
+        assert_eq!(page.items[1].deleted, None, "an unknown spelling reads as live, not an error");
+        assert_eq!(page.items[2].deleted, Some(true));
+        assert_eq!(page.items[3].uuid, "", "a non-object parses as a skipped empty item");
+        assert_eq!(page.items[4].uuid, "", "non-string fields parse as empty for the engine to skip");
     }
 
     #[test]

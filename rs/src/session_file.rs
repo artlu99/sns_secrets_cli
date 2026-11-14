@@ -10,7 +10,7 @@ use std::collections::HashMap;
 use crate::db::is_64_hex;
 use crate::errors::UserError;
 use crate::keychain;
-use crate::paths::{keys_path, session_path, set_mode_600};
+use crate::paths::{keys_path, session_path, set_mode_600, write_secret_file};
 use crate::session::{
     decrypt_value, encrypt_value, generate_keypair, parse_session_file, render_session_file,
     SessionPrivateKey, SessionPublicKey,
@@ -31,7 +31,7 @@ fn read_private_key_file() -> Option<String> {
 
 fn write_private_key_file(key: &str) {
     crate::paths::ensure_config_dir();
-    std::fs::write(keys_path(), format!("# sns session private key\n{PRIVATE_KEY_FIELD}={key}\n")).expect("keys file writes");
+    write_secret_file(&keys_path(), &format!("# sns session private key\n{PRIVATE_KEY_FIELD}={key}\n")).expect("keys file writes");
     set_mode_600(&keys_path());
 }
 
@@ -84,7 +84,7 @@ pub fn save_session(secrets: &SessionSecrets) -> Result<SaveOutcome, UserError> 
         })
         .collect::<Result<Vec<_>, UserError>>()?;
     let file = render_session_file(&public, &fields);
-    std::fs::write(session_path(), file).map_err(|error| UserError(error.to_string()))?;
+    write_secret_file(&session_path(), &file).map_err(|error| UserError(error.to_string()))?;
     set_mode_600(&session_path());
 
     // Custody: the OS keychain wins; .env.keys (mode 0600) is the fallback.
