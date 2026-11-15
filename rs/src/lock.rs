@@ -6,13 +6,9 @@
 //! reads or writes them; the file exists so there is something to flock.
 //! A waiter polls every 200 ms and fails cleanly after `wait_ms`.
 //!
-//! Platforms without `flock` fall back to an exclusive-create sentinel:
-//! exclusion works, a crashed holder's file must be deleted by hand, and
-//! the timeout error says so.
+//! Linux and macOS only (see the crate-level `compile_error` for non-unix).
 
-#[cfg(unix)]
 use std::os::unix::fs::OpenOptionsExt as _;
-#[cfg(unix)]
 use std::os::unix::io::AsRawFd as _;
 use std::time::{Duration, SystemTime};
 
@@ -27,7 +23,6 @@ pub fn acquire_sync_lock(wait_ms: u64) -> Result<impl FnOnce(), UserError> {
 
 /// The lock mechanics over an explicit (owned) path, so tests exercise real
 /// files without the global config-dir override.
-#[cfg(unix)]
 fn acquire_sync_lock_at(path: std::path::PathBuf, wait_ms: u64) -> Result<impl FnOnce(), UserError> {
     // Mode 0600 applies at creation only. The sentinel carries no bytes and
     // no secrets — it exists so the kernel has something to flock, so
@@ -68,35 +63,6 @@ fn acquire_sync_lock_at(path: std::path::PathBuf, wait_ms: u64) -> Result<impl F
     }
 }
 
-/// Exclusive-create fallback where `flock` does not exist: exclusion works,
-/// a crashed holder's sentinel must be deleted by hand.
-#[cfg(not(unix))]
-fn acquire_sync_lock_at(path: std::path::PathBuf, wait_ms: u64) -> Result<impl FnOnce(), UserError> {
-    let started = SystemTime::now();
-    loop {
-        match std::fs::OpenOptions::new().create_new(true).write(true).open(&path) {
-            Ok(file) => {
-                let path_for_release = path.clone();
-                return Ok(move || {
-                    // Only the creator reaches here, so deleting its own
-                    // sentinel can never remove someone else's.
-                    drop(file);
-                    let _ = std::fs::remove_file(&path_for_release);
-                });
-            }
-            Err(error) if error.kind() == std::io::ErrorKind::AlreadyExists => {
-                if ms_since(started) >= wait_ms {
-                    return Err(UserError(
-                        "another sns sync is still running — wait for it to finish, then retry (if no sync is running, delete the stale sync.lock)".into(),
-                    ));
-                }
-                std::thread::sleep(Duration::from_millis(200));
-            }
-            Err(error) => return Err(UserError(error.to_string())),
-        }
-    }
-}
-
 fn ms_since(started: SystemTime) -> u64 {
     started.elapsed().map(|elapsed| elapsed.as_millis() as u64).unwrap_or(u64::MAX)
 }
@@ -128,7 +94,6 @@ mod tests {
         let _ = std::fs::remove_file(&path);
     }
 
-    #[cfg(unix)]
     #[test]
     fn a_leftover_sentinel_file_never_blocks_a_fresh_acquire() {
         let path = temp_lock("sentinel");

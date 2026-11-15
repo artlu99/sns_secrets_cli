@@ -40,8 +40,6 @@ fn run(command: &str, args: &[&str], stdin: Option<&str>) -> Result<RunResult, S
 fn platform() -> &'static str {
     if cfg!(target_os = "macos") {
         "darwin"
-    } else if cfg!(windows) {
-        "windows"
     } else {
         "linux"
     }

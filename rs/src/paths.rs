@@ -35,7 +35,6 @@ pub fn config_dir() -> PathBuf {
 
 fn home_dir() -> PathBuf {
     std::env::var("HOME")
-        .or_else(|_| std::env::var("USERPROFILE"))
         .map(PathBuf::from)
         .unwrap_or_else(|_| PathBuf::from("."))
 }
@@ -76,7 +75,6 @@ pub fn ensure_config_dir() -> PathBuf {
     dir
 }
 
-#[cfg(unix)]
 fn set_mode_700(path: &Path) {
     use std::os::unix::fs::PermissionsExt;
     let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o700));
@@ -84,7 +82,6 @@ fn set_mode_700(path: &Path) {
 
 /// Mode 0600 for secrets-bearing files in the config dir (`.env`,
 /// `.env.session`, `.env.keys`).
-#[cfg(unix)]
 pub(crate) fn set_mode_600(path: &Path) {
     use std::os::unix::fs::PermissionsExt;
     let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
@@ -95,23 +92,12 @@ pub(crate) fn set_mode_600(path: &Path) {
 /// (the session key, the session fields) is readable by other users. A
 /// pre-existing file keeps its mode through the write; `set_mode_600`
 /// tightens it afterwards.
-#[cfg(unix)]
 pub(crate) fn write_secret_file(path: &Path, contents: &str) -> std::io::Result<()> {
     use std::io::Write as _;
     use std::os::unix::fs::OpenOptionsExt;
     let mut file = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(path)?;
     file.write_all(contents.as_bytes())
 }
-
-#[cfg(not(unix))]
-pub(crate) fn write_secret_file(path: &Path, contents: &str) -> std::io::Result<()> {
-    std::fs::write(path, contents)
-}
-
-#[cfg(not(unix))]
-fn set_mode_700(_path: &Path) {}
-#[cfg(not(unix))]
-pub(crate) fn set_mode_600(_path: &Path) {}
 
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub struct PlainConfig {

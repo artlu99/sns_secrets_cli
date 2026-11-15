@@ -3,7 +3,6 @@
 //! stale-clipboard sweep.
 
 use std::io::{IsTerminal as _, Write as _};
-#[cfg(unix)]
 use std::os::unix::process::CommandExt as _;
 use std::process::Stdio;
 
@@ -59,7 +58,6 @@ pub fn write_osc(sequence: &str) -> bool {
 /// A detached (setsid) sleeper cannot open /dev/tty itself (ENXIO) — that
 /// silently swallowed every clear, so the tty fd is opened here and handed
 /// to the child as fd 3, which the sleeper writes to with `>&3`.
-#[cfg(unix)]
 fn arm_clear(sequence: &str) {
     use std::os::unix::io::AsRawFd;
     ensure_config_dir();
@@ -92,21 +90,11 @@ fn arm_clear(sequence: &str) {
     // tty_file closes here, after the fd was duplicated into the child
 }
 
-#[cfg(not(unix))]
-fn arm_clear(_sequence: &str) {
-    // No unix tty fd to hand a sleeper on Windows; the marker lets a later
-    // command clear instead.
-    ensure_config_dir();
-    let marker = format!("{}", now_ms() + 30_000);
-    let _ = std::fs::write(clipboard_marker_path(), marker);
-}
-
 fn copy_via_tool(text: &str) -> bool {
-    let tools: [(&str, &[&str]); 4] = [
+    let tools: [(&str, &[&str]); 3] = [
         ("wl-copy", &[]),
         ("xclip", &["-selection", "clipboard"]),
         ("pbcopy", &[]),
-        ("clip.exe", &[]),
     ];
     for (bin, args) in tools {
         if !which(bin) {
@@ -132,9 +120,8 @@ fn copy_via_tool(text: &str) -> bool {
             Ok(status) => status.success(),
             Err(_) => false,
         };
-        // A helper that exits instantly (no DISPLAY, failed clip.exe) closes
-        // the pipe before the write drains; that is a failed attempt, not a
-        // crash.
+        // A helper that exits instantly (no DISPLAY) closes the pipe before
+        // the write drains; that is a failed attempt, not a crash.
         if drained && ok {
             return true;
         }

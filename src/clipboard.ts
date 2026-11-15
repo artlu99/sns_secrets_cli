@@ -65,7 +65,6 @@ async function copyViaTool(text: string): Promise<boolean> {
     ["wl-copy", []],
     ["xclip", ["-selection", "clipboard"]],
     ["pbcopy", []],
-    ["clip.exe", []],
   ];
   for (const [bin, args] of tools) {
     const path = Bun.which(bin);
@@ -74,8 +73,8 @@ async function copyViaTool(text: string): Promise<boolean> {
       const child = spawn(path, args, { env: scrubbedEnv(), stdio: ["pipe", "ignore", "ignore"] });
       child.on("error", () => resolve(false));
       child.on("close", (code) => resolve(code === 0));
-      // A helper that exits instantly (no DISPLAY, failed clip.exe) closes the
-      // pipe before the write drains; that is a failed attempt, not a crash.
+      // A helper that exits instantly (no DISPLAY) closes the pipe before the
+      // write drains; that is a failed attempt, not a crash.
       child.stdin.on("error", () => resolve(false));
       child.stdin.end(text);
     });

@@ -5,6 +5,9 @@
 //! corresponding `*.test.ts` file (and, where published, from the Standard
 //! Notes specification itself).
 
+#[cfg(not(unix))]
+compile_error!("sns supports Linux and macOS only; Windows support is deferred");
+
 pub mod clipboard;
 pub mod commands;
 pub mod db;

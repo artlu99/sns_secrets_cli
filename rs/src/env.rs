@@ -37,13 +37,8 @@ pub fn which(bin: &str) -> bool {
         let candidate = std::path::Path::new(dir).join(bin);
         std::fs::metadata(&candidate)
             .map(|meta| {
-                #[cfg(unix)]
-                {
-                    use std::os::unix::fs::PermissionsExt;
-                    meta.is_file() && meta.permissions().mode() & 0o111 != 0
-                }
-                #[cfg(not(unix))]
-                meta.is_file()
+                use std::os::unix::fs::PermissionsExt;
+                meta.is_file() && meta.permissions().mode() & 0o111 != 0
             })
             .unwrap_or(false)
     })
