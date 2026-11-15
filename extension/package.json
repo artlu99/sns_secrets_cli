@@ -1,6 +1,7 @@
 {
   "name": "sns-vault-extension",
   "version": "0.3.0",
+  "description": "Chrome MV3 vault UI over the same crypto and note conventions as the sns CLI",
   "private": true,
   "type": "module",
   "scripts": {
@@ -8,7 +9,8 @@
     "build": "wxt build",
     "zip": "wxt zip",
     "typecheck": "wxt prepare && bun check entrypoints lib",
-    "test": "bun test lib"
+    "test": "bun test lib",
+    "test:clipboard": "bun scripts/e2e-clipboard.ts"
   },
   "dependencies": {
     "@fontsource-variable/inter": "^5.3.0",

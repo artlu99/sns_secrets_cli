@@ -1,9 +1,11 @@
-//! sns: Standard Notes reader CLI — Rust rewrite.
+//! sns: Standard Notes reader CLI — portable Rust port.
 //!
-//! The TypeScript implementation under `../src` is the executable spec: every
-//! ported module pins byte-exact parity with golden vectors taken from the
-//! corresponding `*.test.ts` file (and, where published, from the Standard
-//! Notes specification itself).
+//! The TypeScript implementation under `../src` is the tip of the spear and
+//! the executable spec. This crate stays mostly caught up for distribution
+//! (small static binary). Every ported module pins byte-exact parity with
+//! golden vectors taken from the corresponding `*.test.ts` file (and, where
+//! published, from the Standard Notes specification itself). Do not ship
+//! Rust-only product behavior — land it in TypeScript first.
 
 #[cfg(not(unix))]
 compile_error!("sns supports Linux and macOS only; Windows support is deferred");

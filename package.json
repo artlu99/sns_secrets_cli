@@ -1,6 +1,7 @@
 {
   "name": "sn-secrets-cli",
   "version": "0.3.0",
+  "description": "Secure read-only Standard Notes companion — TypeScript CLI (tip of spear), Chrome extension, Rust portable port",
   "module": "src/index.ts",
   "type": "module",
   "private": true,
@@ -11,10 +12,20 @@
     "extension"
   ],
   "scripts": {
-    "build": "bun build --compile --target=bun --outfile=dist/sns --no-compile-autoload-dotenv src/index.ts",
+    "start": "bun src/index.ts",
+    "check": "bun check",
     "typecheck": "bun check",
-    "test": "bun test",
-    "start": "bun src/index.ts"
+    "test": "bun test src",
+    "test:cli": "bun test src",
+    "test:extension": "bun run --cwd extension test",
+    "test:ts": "bun test src extension/lib",
+    "test:rust": "cargo test --manifest-path rs/Cargo.toml",
+    "test:all": "bun run test:ts && bun run test:rust",
+    "build": "bun build --compile --target=bun --outfile=dist/sns --no-compile-autoload-dotenv src/index.ts",
+    "build:extension": "bun run --cwd extension build",
+    "build:rust": "cargo build --release --manifest-path rs/Cargo.toml",
+    "check:rust": "cargo check --manifest-path rs/Cargo.toml",
+    "clippy:rust": "cargo clippy --manifest-path rs/Cargo.toml --all-targets"
   },
   "devDependencies": {
     "@types/bun": "latest",

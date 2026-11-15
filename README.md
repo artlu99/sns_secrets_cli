@@ -1,23 +1,61 @@
 # sn-secrets-cli
 
-`sns` is a terminal client for reading a [Standard Notes](https://standardnotes.com) account. It logs in, pulls your notes, and stores them in an encrypted local cache. After that, listing, searching, showing, and copying read the cache on this machine.
+A **secure, read-only** companion for [Standard Notes](https://standardnotes.com) — the same vault on two surfaces:
 
-The copy command is built for an SSH session. It sends one setting's value — or a whole note — to your local clipboard with [OSC 52](https://invisible-island.net/xterm/ctlseqs/ctlseqs.html) and clears it after 30 seconds. The terminal prints how many bytes were copied, never the value itself.
+| Surface | When you use it |
+|---|---|
+| **CLI** (`sns`) | SSH sessions, scripts, and any machine where a terminal is the right tool |
+| **Chrome extension** | Next to the browser: search a key, reveal one value, copy, done |
 
-[sn-cli](https://github.com/jonhadfield/sn-cli) is the Standard Notes client to use when you want to edit, tag, or export. It is actively maintained, and `sns` borrows what it learned about login and sync. The gap `sns` fills is local storage and the clipboard: sn-cli keeps decrypted notes in a plaintext database, and it has no OSC 52 path. The command here is `sns` so it does not take the `sn` name.
+Neither surface writes notes back to Standard Notes. Create, edit, tag, and export in the official apps (or [sn-cli](https://github.com/jonhadfield/sn-cli)). This project only logs in, syncs, and lets you **find and copy** what is already there.
 
-## First session
+The binary is named `sns` so it does not collide with sn-cli’s `sn`.
 
-Install [Bun](https://bun.sh), then:
+## The model: tagged notes, a few conventions
 
-```bash
-bun install
-bun src/index.ts login
-```
+There is no separate “secrets” schema. Each item is an ordinary Standard Notes note. Tags and folders organize them the same way they do in the apps; both surfaces render the same tag tree (explicit SN folders win; otherwise nesting is inferred from note membership).
 
-`login` asks for the account password, and for a two-factor code when the server requires one. The password is used to derive keys and then dropped. It is not written to a file, an environment variable, or a log. The same command syncs notes into the cache.
+Secrets inside a note are plain `KEY=value` lines — env-style settings with a short list of rules both surfaces share:
 
-`package.json` exposes the `sns` command. After `bun link`, the examples below are the program. `bun src/index.ts` runs it without linking.
+- An assignment starts a line (`KEY = value`); keys are `[\w.-]+`, matched **exactly** and **case-sensitively**.
+- Last assignment wins; keys stay in first-seen order.
+- Quoted values (`"…"`, `'…'`, `` `…` ``) may span lines; nothing is shell-expanded.
+- A whitespace-preceded `#` is a trailing comment (shown beside the key, never copied).
+- Empty values are marked `(empty)`. Prose around the assignments stays prose; assignment-shaped fragments in comments or mid-sentence are redacted in every view.
+
+A note with no settings is still a note — the CLI can copy its whole body; the extension does not (one click dumping every value is too easy in a browser).
+
+## Secure and read-only
+
+Shared invariants across CLI and extension:
+
+- **Values never print.** Inventories show keys (and redacted prose); only `copy` / a click puts a value on the clipboard, one key at a time.
+- **Clipboard clears in ~30 seconds.** The terminal uses [OSC 52](https://invisible-island.net/xterm/ctlseqs/ctlseqs.html) (with a platform-tool fallback); the extension overwrites via an offscreen document (space if the browser refuses empty).
+- **Password is ephemeral.** Prompted without echo, used to derive keys, then dropped — never written to a file, env var, argv, or log.
+- **No page injection.** The extension has no content scripts; its only network traffic is the Standard Notes API.
+- **Crypto stays local.** Argon2id + protocol 004 (XChaCha20-Poly1305) run in-process (CLI) or as WASM in the extension. The crypto core is shared, not forked — parity is tested both ways.
+
+Threat model and unlock chain for the CLI’s on-disk cache: [SECURITY.md](SECURITY.md). Extension session posture and auto-lock: [extension/README.md](extension/README.md).
+
+## Portability
+
+Designed to move with you without dragging secrets into the wrong place:
+
+- **SSH-first CLI.** `sns copy` sends a value to *your local* clipboard over OSC 52, so a remote shell can paste into a local password field. The terminal prints a byte count, never the secret.
+- **Offline after sync (CLI).** `list` / `search` / `show` / `copy` / browse read the encrypted local cache; they do not need the network or a live access token.
+- **Nothing secret on disk (extension).** Master key, tokens, and the decrypted vault live in `chrome.storage.session` only — wiped when the browser exits. Auto-lock after 5 minutes idle (or 2 minutes with the dashboard tab hidden).
+- **Same account, same rules.** Tag nesting, key parsing, and redaction match on both surfaces so a note that looks safe in the terminal looks safe in the popup.
+- **Small config surface (CLI).** Everything under `~/.config/sn_secrets_cli/` (or `SNS_CONFIG_DIR`). Plain `.env` is non-secret (`SN_EMAIL`, `SN_API_URL`); session material is dotenvx-encrypted. Prefer an OS keychain for the dotenvx private key when a secret service is available.
+- **Small static CLI.** Prebuilt Rust binaries are coming soon. Until then, build from [`rs/`](rs/) (`bun run build:rust`) or run the TypeScript tip of spear under [Bun](https://bun.sh) while developing (`bun src/index.ts` / `bun run build`).
+
+## Install
+
+- **CLI** — download a release binary when published, or build as above. Then `sns login` (password + MFA if required), which syncs into the encrypted cache and drops the password.
+- **Extension** — load unpacked from a build of [`extension/`](extension/) (see [extension/README.md](extension/README.md)). Store listing is not in v1.
+
+Config lives in `~/.config/sn_secrets_cli/` (or `SNS_CONFIG_DIR`): plain `.env` (email, API URL), dotenvx-encrypted `.env.session`, optional `.env.keys` when there is no OS secret service, and `cache.db` (whole-file `chacha20`). Details: [SECURITY.md](SECURITY.md).
+
+## CLI
 
 ```bash
 sns list
@@ -26,81 +64,61 @@ sns list --tag <tag-or-folder>
 sns search <query>
 sns show <id>
 sns copy <id> <key>
-sns
+sns                 # interactive browse
 sns sync
 sns logout
+sns doctor
 ```
 
-## Reading a note
-
-`<id>` is the note's uuid, a uuid prefix of at least eight hex characters, or a title prefix that matches exactly one note. Every reading command accepts all three.
-
-Notes that hold env-style settings (`KEY=value` lines) get an inventory flow. `sns list` shows how many settings each note holds, and on a terminal appends one line after the table:
-
-```text
-a title or a uuid, a prefix is enough:  sns show <id>
-```
-
-The hint is omitted when the listing is piped, so a script that reads the table stays a table.
-
-`sns show <id>` prints what the note holds without the values: the prose around the assignments, then each key with its value withheld, in the order the keys first appear, then a hint you can paste:
+`<id>` is a note uuid, a uuid prefix (≥ 8 hex chars), or a title prefix that matches exactly one note. `show` prints prose and a key inventory with values withheld; `copy` puts one value on the clipboard and prints only a byte count (`copied API_KEY (32 bytes, clears in 30s)`). On a settings note, `copy` without a key lists keys and does nothing. `list` / `search` hide key-bearing crypto items unless `--all`; search snippets are cut from masked text. No command writes plaintext note bodies to a temp file.
 
 ```text
 staging api
 ───────────
 Notes on the staging API.
-Ask Alice before rotating.
 
 DB_HOST=[redacted]  # primary host
 API_KEY=[redacted]
-API_URL=[redacted]
 TOKEN=  (empty)
 
 copy a value:  sns copy staging DB_HOST
 ```
 
-An empty value is marked `(empty)`, and a trailing `# comment` from the note shows beside its key with the value redacted out — assignment-shaped text the parser rejected (`# OLD_KEY=…`, a mention mid-sentence) is masked the same way, so no value reaches the terminal. On a terminal, comments and the redaction markers render dim and keys stay bright; piped output and `NO_COLOR` are plain monochrome. There is no full-text view: the raw note belongs to Standard Notes, and its mobile and desktop apps are where you read it.
+## Chrome extension
 
-`sns copy <id> <key>` copies one setting's value. The key is matched exactly and case-sensitively; `API` does not select `API_KEY`. Only the byte count is printed:
+Same vault rules in the browser. Popup searches every `KEY` and copies on click; dashboard shows the tag tree and a reveal/copy inventory. Clipboard clears in 30 s; auto-lock after idle / hidden tab. No content scripts; editing is not in v1. Setup and security model: [extension/README.md](extension/README.md).
 
-```text
-copied API_KEY (32 bytes, clears in 30s)
-```
+## Repository layout
 
-`sns copy <id>` with no key copies nothing when the note has settings — it prints the key names and the two-argument form, so the short command stays the safe one. A missing key exits non-zero the same way. A note without settings still copies its whole body; for that note, the body is the only copy there is. Values reach the clipboard only through `copy`, one key at a time — no command prints one. `show` prints keys and prose only, the picker's View draws the same inventory, and `search` still matches full content but cuts its snippet from the masked text, so a hit on a value shows `KEY=[redacted]`.
-
-## Everything else
-
-`sns` with no arguments asks for a filter, then offers to view or copy the note you pick. `list` renders the tag tree: explicit SN folders (nested tags) win, otherwise containment is inferred from note membership — a tag whose notes all also sit in a bigger tag nests under it (so `data` folds inside `infra` when every data note is also tagged infra). Each note appears exactly once, under its deepest tag; group headers show the tag's full note count, newest first within each, untagged notes last. `list` and `search` hide key-bearing items unless you pass `--all`. `tags` lists every tag and folder as a tree with note counts — read-only, the CLI never creates or edits them. `list --tag` filters notes under a tag or folder, matched by title or uuid prefix. The key inventory `show` prints — which carries no values, as everywhere — prints directly and pages only when taller than the screen; `--no-pager` prints to standard output, and paged text goes through the pager on standard input so it is never written to a temp file. `sync` pulls again and asks for the password only when a new items key cannot be unwrapped with keys already in the cache. `logout` revokes the server session and deletes the local session, the cache key, and the cache. `doctor` reports whether the runtime, keychain, session file, and cache look right.
-
-## Where the files are
-
-Everything lives in `~/.config/sn_secrets_cli/` (override with `SNS_CONFIG_DIR`):
-
-| File | What it holds |
+| Path | Role |
 |---|---|
-| `.env` | Email and API URL. Not secret. |
-| `.env.session` | Refresh token, access token, and the cache key, encrypted with dotenvx. |
-| `.env.keys` | The dotenvx private key, only on a machine with no OS secret service. Mode `0600`. |
-| `cache.db` | Decrypted notes, inside a `chacha20` database. |
+| [`src/`](src/) | **Tip of the spear** for CLI features — executable spec the Rust port tracks. |
+| [`extension/`](extension/) | Chrome MV3 surface; shares crypto / tag / note-env rules with `src/` where possible. |
+| [`rs/`](rs/) | Portable Rust CLI for distribution. Stays **mostly caught up** with `src/` — no Rust-only product behavior. |
 
-The cache key is random. The account password cannot reopen `cache.db`. One key opens every synced note. When a secret service is available, the dotenvx private key is stored in the OS keychain and `.env.keys` is removed. [SECURITY.md](SECURITY.md) describes what a disk copy can read in that case, and what it can read when the key stays in `.env.keys`.
-
-## Browser extension
-
-A companion Chrome extension lives in [extension/](extension/): the same vault, next to the browser. A popup searches every KEY across every note and copies the value on click; a full-page dashboard draws the tag tree — the same nesting rules `sns list` infers — and a per-key inventory with values masked until you reveal them. Prose is masked under the same redaction rules as `sns show`, so no value renders where you did not ask for one. Copies blank the clipboard after 30 seconds (when the browser refuses an empty write, the fallback overwrites with a single space — pasting after the clear yields a space, never the secret).
-
-All cryptography runs in the extension: Argon2id key derivation (the server's own parameters) and XChaCha20-Poly1305 decryption, with libsodium's WASM. The master key and session tokens live in memory-only session storage — nothing secret touches disk, and locking or exiting the browser clears them. The vault locks itself after 5 minutes without input, or 2 minutes with the dashboard tab hidden. The extension never injects into web pages; its only network traffic is to the Standard Notes API. Read-only for now — editing notes is v2. The full security model and setup are in [extension/README.md](extension/README.md).
+Land new CLI behavior in TypeScript (`bun run test`), then port to `rs/` against the same golden vectors. One version across root `package.json`, `extension/package.json`, and `rs/Cargo.toml` (`src/version.test.ts`); tag releases `v<version>`.
 
 ## Development
 
 ```bash
-bun test
-bun check
-bun run build    # standalone binary at dist/sns
+bun install
+bun run test               # tip of spear — bun test src
+bun run check
+bun run build              # Bun-compiled dist/sns
+
+bun run test:extension
+bun run build:extension
+
+bun run test:rust
+bun run build:rust         # first build compiles vendored sqlite3mc
+bun run check:rust
+bun run clippy:rust
+
+bun run test:ts            # src + extension/lib
+bun run test:all           # test:ts then test:rust
 ```
 
-The cache uses `better-sqlite3-multiple-ciphers` rather than `bun:sqlite`, because Bun's built-in SQLite cannot encrypt a file at rest. Other Bun conventions for this repo are in [CLAUDE.md](CLAUDE.md).
+Rust port discipline: [rs/CLAUDE.md](rs/CLAUDE.md). Bun conventions: [CLAUDE.md](CLAUDE.md). Agent plan: [AGENTS.md](AGENTS.md).
 
 ## License
 

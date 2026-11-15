@@ -2,7 +2,7 @@
 name = "sns"
 version = "0.3.0"
 edition = "2024"
-description = "Standard Notes reader CLI — Rust rewrite of sn-secrets-cli"
+description = "Portable sns binary — Rust port of the TypeScript CLI in ../src (catch-up, not tip of spear)"
 
 [dependencies]
 aes-gcm = "0.11.1"

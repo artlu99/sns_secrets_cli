@@ -6,6 +6,11 @@ clipboard. **All cryptography runs in the extension** — Argon2id key
 derivation (64 MiB / 5 iterations, per the server's key params) and
 XChaCha20-Poly1305 decryption never leave this window.
 
+Product behavior for the CLI tip of spear lives in `../src`. This package is
+the browser surface: reuse or mirror `src/` for crypto, note-env, and tags —
+do not fork a third semantics. From the repo root: `bun run test:extension`,
+`bun run build:extension`.
+
 ## Load it (unpacked)
 
 ```sh
