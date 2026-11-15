@@ -27,6 +27,7 @@ PLAN?.md
 !rs/tests/fixtures/cache-v0.2.0.db
 PLAN?.md
 CLAUDE.md
+rs/CLAUDE.md
 AGENTS.md
 
 # extension (wxt): generated types and build output

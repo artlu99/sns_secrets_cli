@@ -96,29 +96,7 @@ Same vault rules in the browser. Popup searches every `KEY` and copies on click;
 | [`extension/`](extension/) | Chrome MV3 surface; shares crypto / tag / note-env rules with `src/` where possible. |
 | [`rs/`](rs/) | Portable Rust CLI for distribution. Stays **mostly caught up** with `src/` — no Rust-only product behavior. |
 
-Land new CLI behavior in TypeScript (`bun run test`), then port to `rs/` against the same golden vectors. One version across root `package.json`, `extension/package.json`, and `rs/Cargo.toml` (`src/version.test.ts`); tag releases `v<version>`.
-
-## Development
-
-```bash
-bun install
-bun run test               # tip of spear — bun test src
-bun run check
-bun run build              # Bun-compiled dist/sns
-
-bun run test:extension
-bun run build:extension
-
-bun run test:rust
-bun run build:rust         # first build compiles vendored sqlite3mc
-bun run check:rust
-bun run clippy:rust
-
-bun run test:ts            # src + extension/lib
-bun run test:all           # test:ts then test:rust
-```
-
-Rust port discipline: [rs/CLAUDE.md](rs/CLAUDE.md). Bun conventions: [CLAUDE.md](CLAUDE.md). Agent plan: [AGENTS.md](AGENTS.md).
+Build, test, porting rules, and security invariants for contributors: [CONTRIBUTING.md](CONTRIBUTING.md).
 
 ## License
 
