@@ -5,6 +5,7 @@
 use clap::{Parser, Subcommand};
 
 use sns::commands;
+use sns::completion::{complete_with_cache, completion_script};
 use sns::errors::UserError;
 
 #[derive(Parser)]
@@ -77,6 +78,21 @@ enum Commands {
         /// exact setting name; omit to list the note's keys
         key: Option<String>,
     },
+    /// print bash or zsh tab-completion script
+    Completion {
+        /// bash or zsh
+        shell: String,
+    },
+    /// hidden: shell scripts call this; prints one candidate per line
+    #[command(name = "__complete", hide = true)]
+    Complete {
+        /// index into the word list (COMP_CWORD)
+        #[arg(long)]
+        cword: usize,
+        /// COMP_WORDS / zsh words
+        #[arg(trailing_var_arg = true, allow_hyphen_values = true)]
+        words: Vec<String>,
+    },
 }
 
 fn parse_limit(raw: &str) -> Result<usize, UserError> {
@@ -113,13 +129,48 @@ fn main() {
         },
         Some(Commands::Show { id, no_pager }) => commands::show_command(&id, no_pager),
         Some(Commands::Copy { id, key }) => commands::copy_command(&id, key.as_deref()),
+        Some(Commands::Completion { shell }) => match completion_script(&shell) {
+            Ok(script) => {
+                print!("{script}");
+                Ok(())
+            }
+            Err(error) => Err(error),
+        },
+        Some(Commands::Complete { cword, words }) => {
+            let candidates = complete_with_cache(&words, cword);
+            if !candidates.is_empty() {
+                println!("{}", candidates.join("\n"));
+            }
+            Ok(())
+        }
     };
 
     if let Err(error) = result {
+        // SNS_DEBUG=1 prints stack traces on the TS side; Result errors carry
+        // no backtrace here, so the Display message is all we have.
         eprintln!("{error}");
-        if std::env::var("SNS_DEBUG").as_deref() == Ok("1") {
-            eprintln!("{error:?}");
-        }
         std::process::exit(1);
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use clap::CommandFactory as _;
+    use sns::completion::SUBCOMMANDS;
+
+    #[test]
+    fn completion_subcommands_match_the_clap_surface() {
+        let declared: Vec<String> = Cli::command()
+            .get_subcommands()
+            .filter(|command| !command.is_hide_set())
+            .map(|command| command.get_name().to_string())
+            .collect();
+        let completion_list: Vec<String> = SUBCOMMANDS
+            .iter()
+            .filter(|name| **name != "help")
+            .map(|name| (*name).to_string())
+            .collect();
+        assert_eq!(completion_list, declared);
     }
 }

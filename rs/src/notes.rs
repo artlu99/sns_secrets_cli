@@ -313,7 +313,9 @@ fn snippet_source(row: &ItemRow) -> String {
 }
 
 /// One prefix resolver for notes and tags: exact uuid, then uuid prefix (when
-/// the query looks like one), then unique title prefix. Ambiguity is an error
+/// the query looks like one), then unique title prefix. Both sides of the
+/// title comparison are trimmed — the completer offers trimmed titles, and a
+/// stored title with stray padding still resolves. Ambiguity is an error
 /// listing the first few matches; `kind` is singular ("note", "tag").
 fn resolve_by_prefix<T: Clone>(
     items: &[T],
@@ -321,12 +323,13 @@ fn resolve_by_prefix<T: Clone>(
     kind: &str,
     key: impl Fn(&T) -> (String, String),
 ) -> Result<T, UserError> {
-    if let Some(exact) = items.iter().find(|item| key(item).0 == query) {
+    let needle = query.trim();
+    if let Some(exact) = items.iter().find(|item| key(item).0 == needle) {
         return Ok(exact.clone());
     }
-    let looks_like_uuid_prefix = query.len() >= 8 && query.chars().all(|c| c.is_ascii_hexdigit() || c == '-');
+    let looks_like_uuid_prefix = needle.len() >= 8 && needle.chars().all(|c| c.is_ascii_hexdigit() || c == '-');
     if looks_like_uuid_prefix {
-        let lowered = query.to_lowercase();
+        let lowered = needle.to_lowercase();
         let by_prefix: Vec<&T> = items.iter().filter(|item| key(item).0.to_lowercase().starts_with(&lowered)).collect();
         if by_prefix.len() == 1 {
             return Ok(by_prefix[0].clone());
@@ -335,8 +338,8 @@ fn resolve_by_prefix<T: Clone>(
             return Err(ambiguous_items(&by_prefix, kind, &key));
         }
     }
-    let prefix = query.to_lowercase();
-    let by_title: Vec<&T> = items.iter().filter(|item| key(item).1.to_lowercase().starts_with(&prefix)).collect();
+    let prefix = needle.to_lowercase();
+    let by_title: Vec<&T> = items.iter().filter(|item| key(item).1.trim().to_lowercase().starts_with(&prefix)).collect();
     if by_title.len() == 1 {
         return Ok(by_title[0].clone());
     }
@@ -373,30 +376,39 @@ pub fn resolve_note(db: &CacheDb, query: &str, all: bool) -> Result<ItemRow, Use
     if let Some(row) = exact_visible_note(db, query, all)? {
         return Ok(row);
     }
-    let mut statement = db
-        .prepare("SELECT uuid, content_type, updated_at, deleted, title, content FROM items WHERE deleted = 0")
-        .map_err(|error| UserError(error.to_string()))?;
-    let rows = statement
-        .query_map([], |row| {
-            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, i64>(2)?, row.get::<_, i64>(3)?, row.get::<_, Option<String>>(4)?, row.get::<_, String>(5)?))
-        })
-        .map_err(|error| UserError(error.to_string()))?
-        .collect::<Result<Vec<_>, _>>()
-        .map_err(|error| UserError(error.to_string()))?;
-    let mut visible_types = vec!["Note"];
+    let mut types: Vec<&str> = vec!["Note"];
     if all {
-        visible_types.extend(HIDDEN_TYPES);
+        types.extend(HIDDEN_TYPES);
     }
-    let visible: Vec<ItemRow> = rows
-        .into_iter()
-        .filter(|row| visible_types.contains(&row.1.as_str()) && !is_trashed(&row.5))
-        .collect();
+    let visible = visible_note_rows(db, &types)?;
     resolve_by_prefix(
         &visible,
         query,
         "note",
         |row: &ItemRow| (row.0.clone(), row.4.clone().unwrap_or_else(|| "(untitled)".into())),
     )
+}
+
+/// The rows note commands can resolve: deleted=0, one of `types`, trash
+/// dropped, newest first. `resolve_note`'s scan and completion's candidate
+/// list share this fetch, so completion never drifts from what the CLI
+/// resolves.
+pub(crate) fn visible_note_rows(db: &CacheDb, types: &[&str]) -> Result<Vec<ItemRow>, UserError> {
+    let placeholders = (1..=types.len()).map(|position| format!("?{position}")).collect::<Vec<_>>().join(", ");
+    let sql = format!(
+        "SELECT uuid, content_type, updated_at, deleted, title, content FROM items
+         WHERE deleted = 0 AND content_type IN ({placeholders})
+         ORDER BY updated_at DESC"
+    );
+    let mut statement = db.prepare(&sql).map_err(|error| UserError(error.to_string()))?;
+    let rows = statement
+        .query_map(rusqlite::params_from_iter(types.iter().copied()), |row| {
+            Ok((row.get::<_, String>(0)?, row.get::<_, String>(1)?, row.get::<_, i64>(2)?, row.get::<_, i64>(3)?, row.get::<_, Option<String>>(4)?, row.get::<_, String>(5)?))
+        })
+        .map_err(|error| UserError(error.to_string()))?
+        .collect::<Result<Vec<_>, _>>()
+        .map_err(|error| UserError(error.to_string()))?;
+    Ok(rows.into_iter().filter(|row| !is_trashed(&row.5)).collect())
 }
 
 /// The exact-uuid pass of `resolve_by_prefix` as a point query. None when the

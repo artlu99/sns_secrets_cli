@@ -50,10 +50,16 @@ Designed to move with you without dragging secrets into the wrong place:
 
 ## Install
 
-- **CLI** — download a release binary when published, or build as above. Then `sns login` (password + MFA if required), which syncs into the encrypted cache and drops the password.
+- **CLI** — download a release binary when published, or build as above. Then `sns login` (password + MFA if required), which syncs into the encrypted cache and drops the password. Login always confirms the email (pre-filled from `SN_EMAIL`); choose another address to switch accounts — you will be asked to logout the current session first.
 - **Extension** — load unpacked from a build of [`extension/`](extension/) (see [extension/README.md](extension/README.md)). Store listing is not in v1.
 
 Config lives in `~/.config/sn_secrets_cli/` (or `SNS_CONFIG_DIR`): plain `.env` (email, API URL), dotenvx-encrypted `.env.session`, optional `.env.keys` when there is no OS secret service, and `cache.db` (whole-file `chacha20`). Details: [SECURITY.md](SECURITY.md).
+
+Tab completion for `show` / `copy` (note ids, then setting keys):
+
+```bash
+eval "$(sns completion bash)"   # or: eval "$(sns completion zsh)"
+```
 
 ## CLI
 
@@ -68,6 +74,7 @@ sns                 # interactive browse
 sns sync
 sns logout
 sns doctor
+sns completion bash|zsh
 ```
 
 `<id>` is a note uuid, a uuid prefix (≥ 8 hex chars), or a title prefix that matches exactly one note. `show` prints prose and a key inventory with values withheld; `copy` puts one value on the clipboard and prints only a byte count (`copied API_KEY (32 bytes, clears in 30s)`). On a settings note, `copy` without a key lists keys and does nothing. `list` / `search` hide key-bearing crypto items unless `--all`; search snippets are cut from masked text. No command writes plaintext note bodies to a temp file.

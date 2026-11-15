@@ -12,6 +12,7 @@ compile_error!("sns supports Linux and macOS only; Windows support is deferred")
 
 pub mod clipboard;
 pub mod commands;
+pub mod completion;
 pub mod db;
 pub mod env;
 pub mod errors;

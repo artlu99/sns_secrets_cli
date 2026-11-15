@@ -116,6 +116,27 @@ fn the_binary_drives_a_crafted_session_end_to_end() {
     assert_eq!(code, 0);
     assert!(stdout.contains("no tags in the cache"), "stdout:\n{stdout}");
 
+    let (code, stdout, _) = run_cli(&["completion", "bash"], &dir.display().to_string());
+    assert_eq!(code, 0);
+    assert!(
+        stdout.contains("sns __complete") && stdout.contains("complete -o nospace -F _sns sns"),
+        "stdout:\n{stdout}"
+    );
+
+    let (code, stdout, _) = run_cli(
+        &["__complete", "--cword", "2", "--", "sns", "show", "Sta"],
+        &dir.display().to_string(),
+    );
+    assert_eq!(code, 0, "completer runs");
+    assert_eq!(stdout.trim(), "Staging", "stdout:\n{stdout}");
+
+    let (code, stdout, _) = run_cli(
+        &["__complete", "--cword", "3", "--", "sns", "copy", "Staging", "API"],
+        &dir.display().to_string(),
+    );
+    assert_eq!(code, 0);
+    assert_eq!(stdout.trim(), "API_KEY", "stdout:\n{stdout}");
+
     // A wrong-key cache is replaced by logout --delete-cache's contract, and
     // logout removes the secrets.
     let (code, stdout, _) = run_cli(&["logout"], &dir.display().to_string());

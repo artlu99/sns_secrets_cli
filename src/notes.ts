@@ -213,7 +213,9 @@ function snippetSource(row: ItemRow): string {
 
 /**
  * One prefix resolver for notes and tags: exact uuid, then uuid prefix (when
- * the query looks like one), then unique title prefix. Ambiguity is an error
+ * the query looks like one), then unique title prefix. Both sides of the
+ * title comparison are trimmed — the completer offers trimmed titles, and a
+ * stored title with stray padding still resolves. Ambiguity is an error
  * listing the first few matches; `kind` is singular ("note", "tag").
  */
 function resolveByPrefix<T>(
@@ -222,16 +224,17 @@ function resolveByPrefix<T>(
   kind: string,
   key: (item: T) => { uuid: string; title: string },
 ): T {
-  const exact = items.find((item) => key(item).uuid === query);
+  const needle = query.trim();
+  const exact = items.find((item) => key(item).uuid === needle);
   if (exact) return exact;
-  if (/^[0-9a-fA-F-]{8,}$/.test(query)) {
-    const lowered = query.toLowerCase();
+  if (/^[0-9a-fA-F-]{8,}$/.test(needle)) {
+    const lowered = needle.toLowerCase();
     const byPrefix = items.filter((item) => key(item).uuid.toLowerCase().startsWith(lowered));
     if (byPrefix.length === 1) return byPrefix[0]!;
     if (byPrefix.length > 1) throw ambiguousItems(byPrefix, kind, key);
   }
-  const prefix = query.toLowerCase();
-  const byTitle = items.filter((item) => key(item).title.toLowerCase().startsWith(prefix));
+  const prefix = needle.toLowerCase();
+  const byTitle = items.filter((item) => key(item).title.trim().toLowerCase().startsWith(prefix));
   if (byTitle.length === 1) return byTitle[0]!;
   if (byTitle.length > 1) throw ambiguousItems(byTitle, kind, key);
   throw new UserError(`no ${kind} matches ${JSON.stringify(query)}`);
@@ -252,13 +255,25 @@ function ambiguousItems<T>(
   return new UserError(`that matches ${matches.length} ${kind}s; be more specific:\n${sample}`);
 }
 
-export function resolveNote(db: CacheDb, query: string, options: { all?: boolean } = {}): ItemRow {
+/**
+ * The rows note commands can resolve: deleted=0, one of `types`, trash
+ * dropped, newest first. `resolveNote`'s scan and completion's candidate list
+ * share this fetch, so completion never drifts from what the CLI resolves.
+ */
+export function visibleNoteRows(db: CacheDb, types: readonly string[]): ItemRow[] {
   const rows = db
-    .prepare("SELECT uuid, content_type, updated_at, deleted, title, content FROM items WHERE deleted = 0")
-    .all() as ItemRow[];
-  const visibleTypes = new Set(["Note", ...(options.all ? HIDDEN_TYPES : [])]);
-  const visible = rows.filter((row) => visibleTypes.has(row.content_type) && !isTrashed(row.content));
-  return resolveByPrefix(visible, query, "note", (row) => ({
+    .prepare(
+      `SELECT uuid, content_type, updated_at, deleted, title, content FROM items
+       WHERE deleted = 0 AND content_type IN (${types.map(() => "?").join(", ")})
+       ORDER BY updated_at DESC`,
+    )
+    .all(...types) as ItemRow[];
+  return rows.filter((row) => !isTrashed(row.content));
+}
+
+export function resolveNote(db: CacheDb, query: string, options: { all?: boolean } = {}): ItemRow {
+  const types = ["Note", ...(options.all ? HIDDEN_TYPES : [])];
+  return resolveByPrefix(visibleNoteRows(db, types), query, "note", (row) => ({
     uuid: row.uuid,
     title: row.title ?? "(untitled)",
   }));
