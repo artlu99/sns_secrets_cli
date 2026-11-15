@@ -1,6 +1,6 @@
 [package]
 name = "sns"
-version = "0.2.0"
+version = "0.3.0"
 edition = "2024"
 description = "Standard Notes reader CLI — Rust rewrite of sn-secrets-cli"
 

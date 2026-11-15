@@ -76,7 +76,7 @@ fn the_binary_drives_a_crafted_session_end_to_end() {
     // `sns --version` matches the package version.
     let (code, stdout, _) = run_cli(&["--version"], &dir.display().to_string());
     assert_eq!(code, 0);
-    assert_eq!(stdout.trim(), "sns 0.2.0");
+    assert_eq!(stdout.trim(), format!("sns {}", env!("CARGO_PKG_VERSION")));
 
     // list without a cache names the next step instead of crashing.
     let (code, _stdout, stderr) = run_cli(&["list"], &dir.display().to_string());
