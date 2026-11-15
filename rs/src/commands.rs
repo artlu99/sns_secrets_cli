@@ -26,7 +26,7 @@ use crate::paths::{
     config_dir, db_path, ensure_config_dir, env_path, read_plain_config, session_path,
     unexpected_config_files, write_plain_config,
 };
-use crate::prompt::{prompt_line, prompt_secret};
+use crate::prompt::{prompt_confirm, prompt_line, prompt_secret};
 use crate::session_file::{delete_session, load_session, persist, save_session, session_key_names};
 use crate::sn_api::{random_db_key, with_access, ApiClient, ApiClientError, SessionSecrets};
 use crate::sync_engine::{run_sync, SyncOptions, SyncReport};
@@ -424,17 +424,22 @@ pub fn doctor_command() -> i32 {
 pub fn login_command() -> Result<(), UserError> {
     intro("login");
     let plain = read_plain_config();
-    let mut email = plain.email.clone();
-    if email.is_empty() {
-        email = prompt_line("Email", None)?;
-    }
+    // Always confirm the email so a saved SN_EMAIL is not a dead end — Enter
+    // keeps it; typing another address is the escape hatch for a different account.
+    let email = prompt_line(
+        "Email",
+        if plain.email.is_empty() {
+            None
+        } else {
+            Some(plain.email.as_str())
+        },
+    )?;
     if !email.contains('@') {
         return Err(UserError("email looks wrong".into()));
     }
-    write_plain_config(Some(&email), Some(&plain.api_url));
 
     let password = prompt_secret("Account password")?;
-    let existing: Option<SessionSecrets> = if session_path().exists() {
+    let mut existing: Option<SessionSecrets> = if session_path().exists() {
         // `sns login` is the recovery path for a broken session — it must not
         // fail on the very state it exists to fix.
         match load_session() {
@@ -447,15 +452,30 @@ pub fn login_command() -> Result<(), UserError> {
     } else {
         None
     };
-    if let Some(existing) = &existing
-        && !existing.account_email.is_empty()
-        && existing.account_email != email
+    if let Some(session) = &existing
+        && !session.account_email.is_empty()
+        && session.account_email != email
     {
-        return Err(UserError(format!(
-            "this session belongs to {} — run sns logout before logging in as {email}",
-            existing.account_email
-        )));
+        let switch = prompt_confirm(
+            &format!(
+                "session belongs to {} — logout and continue as {email}?",
+                session.account_email
+            ),
+            false,
+        )?;
+        if !switch {
+            return Err(UserError(format!(
+                "this session belongs to {} — run sns logout before logging in as {email}",
+                session.account_email
+            )));
+        }
+        let _ = clear_session(false)?;
+        existing = None;
     }
+    // The typed email is persisted only once the account switch is settled —
+    // declining must leave .env pointing at the account still logged in.
+    write_plain_config(Some(&email), Some(&plain.api_url));
+
     let db_key = existing
         .as_ref()
         .map(|secrets| secrets.db_key.clone())
@@ -488,8 +508,9 @@ pub fn login_command() -> Result<(), UserError> {
     Ok(())
 }
 
-pub fn logout_command(delete_cache: bool) -> Result<(), UserError> {
-    intro("logout");
+/// Revoke the server session (best-effort) and delete local secrets.
+/// Used by `sns logout` and by login when switching accounts.
+pub fn clear_session(delete_cache: bool) -> Result<bool, UserError> {
     let secrets: Option<SessionSecrets> = if session_path().exists() {
         // A broken session must not strand its secrets on disk: delete them
         // anyway.
@@ -525,7 +546,12 @@ pub fn logout_command(delete_cache: bool) -> Result<(), UserError> {
         remove_cache_files(&db_path());
     }
     drop(release);
+    Ok(revoked)
+}
 
+pub fn logout_command(delete_cache: bool) -> Result<(), UserError> {
+    intro("logout");
+    let revoked = clear_session(delete_cache)?;
     let cache_note = if delete_cache {
         " The encrypted cache was removed with the database key."
     } else {
@@ -814,7 +840,7 @@ pub fn browse_command() -> Result<(), UserError> {
     intro("");
     let db = open_cache()?;
     loop {
-        let query = prompt_line("Filter", Some("title, or empty for recent"))?;
+        let query = prompt_line("Filter (empty for recent)", None)?;
         let notes: Vec<ListedNote> = if query.is_empty() {
             list_notes(&db, ListOptions { limit: 20, ..Default::default() }).map_err(UserError::from)?
         } else {

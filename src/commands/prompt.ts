@@ -1,4 +1,4 @@
-import { cancel, password, text } from "@clack/prompts";
+import { cancel, confirm, password, text } from "@clack/prompts";
 import { UserError } from "../errors.ts";
 
 export function unwrap<T>(value: T): Exclude<T, symbol> {
@@ -15,6 +15,19 @@ export async function promptSecret(message: string): Promise<string> {
   return value;
 }
 
-export async function promptLine(message: string, placeholder?: string): Promise<string> {
-  return unwrap(await text({ message, placeholder })).trim();
+export async function promptLine(
+  message: string,
+  options: { placeholder?: string; initialValue?: string } = {},
+): Promise<string> {
+  return unwrap(
+    await text({
+      message,
+      placeholder: options.placeholder,
+      initialValue: options.initialValue,
+    }),
+  ).trim();
+}
+
+export async function promptConfirm(message: string, initialValue = false): Promise<boolean> {
+  return unwrap(await confirm({ message, initialValue }));
 }

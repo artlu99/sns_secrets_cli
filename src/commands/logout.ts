@@ -8,8 +8,12 @@ import { createApi, withAccess } from "../sn-api.ts";
 import { dbPath, readPlainConfig, sessionPath } from "../paths.ts";
 import { deleteSession, loadSession, saveSession, type SessionSecrets } from "../session-file.ts";
 
-export async function logoutCommand(options: { deleteCache?: boolean } = {}): Promise<void> {
-  intro("sns logout");
+/**
+ * Revoke the server session (best-effort) and delete local secrets.
+ * Used by `sns logout` and by login when switching accounts.
+ * Returns whether the server revoke succeeded.
+ */
+export async function clearSession(options: { deleteCache?: boolean } = {}): Promise<{ revoked: boolean }> {
   let secrets: SessionSecrets | null = null;
   if (existsSync(sessionPath())) {
     try {
@@ -48,6 +52,12 @@ export async function logoutCommand(options: { deleteCache?: boolean } = {}): Pr
     release();
   }
 
+  return { revoked };
+}
+
+export async function logoutCommand(options: { deleteCache?: boolean } = {}): Promise<void> {
+  intro("sns logout");
+  const { revoked } = await clearSession(options);
   const cacheNote = options.deleteCache
     ? " The encrypted cache was removed with the database key."
     : " The encrypted cache stays; the next sync replaces it because its key is gone.";

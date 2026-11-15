@@ -11,7 +11,7 @@ export async function browseCommand(): Promise<void> {
   const db = await openCache();
   try {
     while (true) {
-      const query = await promptLine("Filter", "title, or empty for recent");
+      const query = await promptLine("Filter", { placeholder: "title, or empty for recent" });
       const notes = query === "" ? listNotes(db, { limit: 20 }) : searchNotes(db, query, { limit: 20 });
       if (notes.length === 0) {
         console.error("no matches");
