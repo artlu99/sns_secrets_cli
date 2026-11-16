@@ -23,8 +23,8 @@ use crate::notes::{
 };
 use crate::pager::{page_if_tall, write_stdout, PageOptions};
 use crate::paths::{
-    config_dir, db_path, ensure_config_dir, env_path, read_plain_config, session_path,
-    unexpected_config_files, write_plain_config,
+    config_dir, db_path, ensure_config_dir, env_path, keys_path, read_plain_config, session_path,
+    unexpected_config_files, write_plain_config, KNOWN_CONFIG_FILES,
 };
 use crate::prompt::{prompt_confirm, prompt_line, prompt_secret};
 use crate::session_file::{delete_session, load_session, persist, save_session, session_key_names};
@@ -565,6 +565,100 @@ pub fn logout_command(delete_cache: bool) -> Result<(), UserError> {
     Ok(())
 }
 
+/// Port of `src/commands/purge.ts` — local amnesia. Deletes every file sns
+/// created in the config directory (a never-decryptable cache included),
+/// removes the directory when nothing unrecognized remains, and never
+/// touches the network. The revocation warning is only actionable BEFORE
+/// the deletion: purge removes the session credentials, so `sns logout`
+/// after the fact is a dead end.
+pub fn purge_command(yes: bool) -> Result<(), UserError> {
+    intro("purge");
+    let dir = config_dir();
+    if !dir.exists() {
+        return Err(UserError(format!("nothing to purge — {} does not exist", dir.display())));
+    }
+    let mut known: Vec<String> = Vec::new();
+    let mut unknown: Vec<String> = Vec::new();
+    for entry in std::fs::read_dir(&dir).map_err(|error| UserError(error.to_string()))? {
+        let name = entry
+            .map_err(|error| UserError(error.to_string()))?
+            .file_name()
+            .to_string_lossy()
+            .to_string();
+        if KNOWN_CONFIG_FILES.contains(&name.as_str()) {
+            known.push(name);
+        } else {
+            unknown.push(name);
+        }
+    }
+    if known.is_empty() && unknown.is_empty() {
+        std::fs::remove_dir_all(&dir).map_err(|error| UserError(error.to_string()))?;
+        outro(&format!("{} had nothing in it — removed", dir.display()));
+        return Ok(());
+    }
+
+    let session_existed = session_path().exists();
+    let session_note = if session_existed {
+        " A server session exists — purge does not revoke it; cancel and run `sns logout` first if you want that."
+    } else {
+        " Any server session left over stays valid until its natural expiry."
+    };
+    if !yes {
+        if !std::io::stdin().is_terminal() {
+            return Err(UserError(
+                "`sns purge` deletes every local file and cannot be undone — pass --yes to run without a terminal".into(),
+            ));
+        }
+        let readable_cache = if session_existed || keys_path().exists() {
+            " — its contents are currently readable"
+        } else {
+            ""
+        };
+        let confirmed = prompt_confirm(
+            &format!(
+                "delete {} file(s) in {} (including the note cache{})? This cannot be undone.{session_note}",
+                known.len(),
+                dir.display(),
+                readable_cache
+            ),
+            false,
+        )?;
+        if !confirmed {
+            return Err(UserError("purge cancelled".into()));
+        }
+    } else if session_existed {
+        eprintln!("note: the server session will not be revoked — run sns logout first if you want that (proceeding with purge)");
+    }
+
+    // Hold the sync lock: deleting cache.db under a running sync would send
+    // its writes into a deleted inode while it reports success. sync.lock is
+    // itself purged; the kernel flock lives on the inode, so unlocking an
+    // unlinked file afterwards is fine.
+    let release = acquire_sync_lock(30_000)?;
+    for name in &known {
+        let _ = std::fs::remove_file(dir.join(name));
+    }
+    keychain::keychain_delete();
+    release();
+
+    let note = if unknown.is_empty() {
+        std::fs::remove_dir_all(&dir).map_err(|error| UserError(error.to_string()))?;
+        " The config directory was removed.".to_string()
+    } else {
+        format!(
+            " {} unrecognized file(s) left in place for you to inspect: {}",
+            unknown.len(),
+            unknown.join(", ")
+        )
+    };
+    outro(&format!(
+        "purged {} file(s) from {}.{note} The server session was not revoked and can no longer be from this machine — it expires on its own schedule.",
+        known.len(),
+        dir.display()
+    ));
+    Ok(())
+}
+
 pub struct PullOutcome {
     pub report: SyncReport,
     pub replaced: bool,
@@ -985,4 +1079,104 @@ pub fn render_tag_tree(tags: &[ListedTag]) -> String {
         .map(|(label, count)| format!("{}  {}", pad_end(label, width), count))
         .collect::<Vec<_>>()
         .join("\n")
+}
+
+#[cfg(test)]
+mod purge_tests {
+    use super::*;
+    use crate::paths::with_config_dir;
+    use std::path::PathBuf;
+
+    // Serialized: the global config override has one slot, and concurrent
+    // tests would otherwise resolve into each other's config dirs.
+    fn serial_guard() -> std::sync::MutexGuard<'static, ()> {
+        static CONFIG_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+        CONFIG_LOCK.lock().expect("test config lock")
+    }
+
+    fn seeded_dir(tag: &str) -> PathBuf {
+        let mut bytes = [0u8; 4];
+        getrandom::fill(&mut bytes).expect("system rng");
+        let hex: String = bytes.iter().map(|byte| format!("{byte:02x}")).collect();
+        let dir = std::env::temp_dir().join(format!("sns-rs-purge-{}-{hex}-{tag}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        for name in [
+            "cache.db",
+            "cache.db-wal",
+            ".env",
+            ".env.session",
+            ".env.keys",
+            "sync.lock",
+            "clipboard-clear-at",
+        ] {
+            std::fs::write(dir.join(name), "x").unwrap();
+        }
+        dir
+    }
+
+    #[test]
+    fn purge_yes_deletes_every_known_file_and_removes_the_empty_dir() {
+        crate::keychain::disable_for_tests();
+        let _serial = serial_guard();
+        let dir = seeded_dir("wipe");
+        with_config_dir(dir.to_str().unwrap(), || {
+            purge_command(true).unwrap();
+        });
+        assert!(!dir.exists());
+    }
+
+    #[test]
+    fn purge_without_yes_refuses_a_non_terminal_and_deletes_nothing() {
+        let dir = seeded_dir("refuse");
+        let _serial = serial_guard();
+        with_config_dir(dir.to_str().unwrap(), || {
+            let error = purge_command(false).unwrap_err();
+            assert!(error.0.contains("--yes"), "{error:?}");
+        });
+        assert!(dir.join("cache.db").exists());
+        assert!(dir.join(".env.session").exists());
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn unrecognized_files_are_left_in_place_and_the_directory_is_kept() {
+        crate::keychain::disable_for_tests();
+        let _serial = serial_guard();
+        let dir = seeded_dir("unknown");
+        std::fs::write(dir.join("operator-notes.txt"), "mine").unwrap();
+        with_config_dir(dir.to_str().unwrap(), || {
+            purge_command(true).unwrap();
+        });
+        let remaining: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().to_string())
+            .collect();
+        assert_eq!(remaining, vec!["operator-notes.txt".to_string()]);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn purge_on_a_missing_config_dir_is_a_clear_error() {
+        let parent = std::env::temp_dir().join(format!("sns-rs-purge-none-{}", std::process::id()));
+        let _serial = serial_guard();
+        std::fs::create_dir_all(&parent).unwrap();
+        let dir = parent.join("absent");
+        with_config_dir(dir.to_str().unwrap(), || {
+            let error = purge_command(true).unwrap_err();
+            assert!(error.0.contains("nothing to purge"), "{error:?}");
+        });
+        std::fs::remove_dir_all(&parent).ok();
+    }
+
+    #[test]
+    fn purge_on_an_already_empty_config_dir_removes_it() {
+        crate::keychain::disable_for_tests();
+        let _serial = serial_guard();
+        let dir = std::env::temp_dir().join(format!("sns-rs-purge-empty-{}", std::process::id()));
+        std::fs::create_dir_all(&dir).unwrap();
+        with_config_dir(dir.to_str().unwrap(), || {
+            purge_command(true).unwrap();
+        });
+        assert!(!dir.exists());
+    }
 }

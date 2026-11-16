@@ -18,12 +18,14 @@ pub const SUBCOMMANDS: &[&str] = &[
     "doctor",
     "login",
     "logout",
+    "purge",
     "sync",
     "tags",
     "list",
     "search",
     "show",
     "copy",
+    "sink",
     "completion",
     "help",
 ];
@@ -106,8 +108,8 @@ fn stage_for(words: &[String], cword: usize) -> Stage {
     let command = args.first().copied().unwrap_or("");
     let kind = match (command, current) {
         ("completion", 0) => StageKind::Shells,
-        ("show", 0) | ("copy", 0) => StageKind::NoteIds,
-        ("copy", 1) => StageKind::Keys,
+        ("show", 0) | ("copy", 0) | ("sink", 0) => StageKind::NoteIds,
+        ("copy", 1) | ("sink", 1) => StageKind::Keys,
         ("logout", 0) => StageKind::LogoutFlag,
         _ => StageKind::None,
     };

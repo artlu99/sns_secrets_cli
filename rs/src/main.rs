@@ -31,6 +31,12 @@ enum Commands {
         #[arg(long)]
         delete_cache: bool,
     },
+    /// delete the entire local config directory (offline; never touches the server)
+    Purge {
+        /// skip the confirmation prompt (required when not a terminal)
+        #[arg(short = 'y', long)]
+        yes: bool,
+    },
     /// pull and decrypt notes into the encrypted cache
     Sync,
     /// list tags and folders (read-only)
@@ -78,6 +84,18 @@ enum Commands {
         /// exact setting name; omit to list the note's keys
         key: Option<String>,
     },
+    /// write one setting value to a 0600 file (agent handoff; the value is never displayed)
+    Sink {
+        /// uuid or title prefix
+        id: String,
+        /// exact setting name
+        key: String,
+        /// destination file (created 0600; must not exist without --force)
+        path: String,
+        /// overwrite an existing file (still 0600)
+        #[arg(long)]
+        force: bool,
+    },
     /// print bash or zsh tab-completion script
     Completion {
         /// bash or zsh
@@ -117,6 +135,7 @@ fn main() {
         }
         Some(Commands::Login) => commands::login_command(),
         Some(Commands::Logout { delete_cache }) => commands::logout_command(delete_cache),
+        Some(Commands::Purge { yes }) => commands::purge_command(yes),
         Some(Commands::Sync) => commands::sync_command(),
         Some(Commands::Tags) => commands::tags_command(),
         Some(Commands::List { content_type, tag, limit, all }) => match parse_limit(&limit) {
@@ -129,6 +148,7 @@ fn main() {
         },
         Some(Commands::Show { id, no_pager }) => commands::show_command(&id, no_pager),
         Some(Commands::Copy { id, key }) => commands::copy_command(&id, key.as_deref()),
+        Some(Commands::Sink { id, key, path, force }) => sns::sink::sink_command(&id, &key, &path, force),
         Some(Commands::Completion { shell }) => match completion_script(&shell) {
             Ok(script) => {
                 print!("{script}");

@@ -62,8 +62,24 @@ fn probe_result(stderr: &str, code: i32) -> bool {
     code == 1
 }
 
+use std::sync::atomic::{AtomicBool, Ordering as AtomicOrdering};
+
+static TEST_DISABLE: AtomicBool = AtomicBool::new(false);
+
+/// Test escape hatch — the port of the TS `SNS_DISABLE_KEYCHAIN` guard.
+/// `security add-generic-password -U` is an upsert, so a test calling
+/// save_session or purge would clobber the developer's real keychain entry
+/// on macOS. An atomic instead of the env var because edition 2024 marks
+/// `set_var` unsafe in multi-threaded test binaries.
+pub fn disable_for_tests() {
+    TEST_DISABLE.store(true, AtomicOrdering::Relaxed);
+}
+
 /// The OS secret service answered. A missing item still counts as available.
 pub fn secret_service_available() -> bool {
+    if TEST_DISABLE.load(AtomicOrdering::Relaxed) {
+        return false;
+    }
     match platform() {
         "darwin" => which("security"),
         "linux" => {

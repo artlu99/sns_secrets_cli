@@ -87,16 +87,52 @@ pub(crate) fn set_mode_600(path: &Path) {
     let _ = std::fs::set_permissions(path, std::fs::Permissions::from_mode(0o600));
 }
 
-/// Write a secrets-bearing file with mode 0600 at creation: the mode is set
-/// before the first byte lands, so there is no window in which the content
-/// (the session key, the session fields) is readable by other users. A
-/// pre-existing file keeps its mode through the write; `set_mode_600`
-/// tightens it afterwards.
+/// Write a secrets-bearing file crash-safe: a temp file is created O_EXCL|
+/// O_NOFOLLOW at 0600, fully written and mode-asserted, then atomically
+/// renamed over the destination — a crash never leaves a half-written
+/// secret, and a planted symlink at the destination is replaced, never
+/// written through. (Port of the TS `writePrivateFileSync`.)
 pub(crate) fn write_secret_file(path: &Path, contents: &str) -> std::io::Result<()> {
     use std::io::Write as _;
-    use std::os::unix::fs::OpenOptionsExt;
-    let mut file = std::fs::OpenOptions::new().write(true).create(true).truncate(true).mode(0o600).open(path)?;
-    file.write_all(contents.as_bytes())
+    use std::os::unix::fs::OpenOptionsExt as _;
+    let suffix = random_suffix();
+    let tmp = PathBuf::from(format!("{}.tmp-{}-{suffix}", path.display(), std::process::id()));
+    let mut file = std::fs::OpenOptions::new()
+        .write(true)
+        .create_new(true)
+        .mode(0o600)
+        .custom_flags(libc::O_NOFOLLOW)
+        .open(&tmp)?;
+    let outcome = file
+        .write_all(contents.as_bytes())
+        .and_then(|()| {
+            use std::os::unix::fs::PermissionsExt as _;
+            file.set_permissions(std::fs::Permissions::from_mode(0o600))
+        });
+    drop(file);
+    match outcome {
+        Ok(()) => rename_or_cleanup(&tmp, path),
+        Err(error) => {
+            let _ = std::fs::remove_file(&tmp);
+            Err(error)
+        }
+    }
+}
+
+fn rename_or_cleanup(tmp: &Path, path: &Path) -> std::io::Result<()> {
+    match std::fs::rename(tmp, path) {
+        Ok(()) => Ok(()),
+        Err(error) => {
+            let _ = std::fs::remove_file(tmp);
+            Err(error)
+        }
+    }
+}
+
+fn random_suffix() -> String {
+    let mut bytes = [0u8; 4];
+    getrandom::fill(&mut bytes).expect("system rng");
+    bytes.iter().map(|byte| format!("{byte:02x}")).collect()
 }
 
 #[derive(Debug, Clone, PartialEq, Eq)]
@@ -151,11 +187,37 @@ pub fn write_plain_config(email: Option<&str>, api_url: Option<&str>) {
     let current = read_plain_config();
     let email = email.unwrap_or(&current.email);
     let api_url = api_url.unwrap_or(&current.api_url);
-    std::fs::write(env_path(), format!("SN_EMAIL={email}\nSN_API_URL={api_url}\n")).expect("plain config writes");
+    // Operators keep hand-added lines: every rewrite carries them through
+    // instead of truncating the file to the two keys this program owns.
+    // (Port of the TS writePlainConfig preservation.)
+    const OWNED: [&str; 2] = ["SN_EMAIL", "SN_API_URL"];
+    let mut preserved: Vec<String> = Vec::new();
+    if let Ok(text) = std::fs::read_to_string(env_path()) {
+        for line in text.split('\n') {
+            let trimmed = line.trim_start();
+            let owned = OWNED
+                .iter()
+                .any(|key| trimmed.starts_with(key) && trimmed[key.len()..].trim_start().starts_with('='));
+            if !owned {
+                preserved.push(line.to_string());
+            }
+        }
+    }
+    let mut out = format!("SN_EMAIL={email}\nSN_API_URL={api_url}\n");
+    let tail = preserved.join("\n");
+    let tail = tail.trim_end_matches('\n');
+    if !tail.is_empty() {
+        out.push_str(tail);
+        out.push('\n');
+    }
+    std::fs::write(env_path(), out).expect("plain config writes");
     set_mode_600(&env_path());
 }
 
-const ALLOWED_CONFIG_FILES: [&str; 9] = [
+/// Every file sns creates in the config directory. `sns purge` deletes
+/// exactly these; anything else is left in place and named (the same set
+/// doctor's unexpected-files check flags).
+pub const KNOWN_CONFIG_FILES: [&str; 9] = [
     ".env",
     ".env.session",
     ".env.keys",
@@ -174,6 +236,6 @@ pub fn unexpected_config_files() -> Vec<String> {
     entries
         .filter_map(|entry| entry.ok())
         .map(|entry| entry.file_name().to_string_lossy().into_owned())
-        .filter(|name| !ALLOWED_CONFIG_FILES.contains(&name.as_str()))
+        .filter(|name| !KNOWN_CONFIG_FILES.contains(&name.as_str()))
         .collect()
 }
