@@ -6,6 +6,10 @@ import { createPkce, mfaChallenge, parseKeyParams, pkceChallenge } from "./sn-ap
 import { loadSession, saveSession, sessionKeyNames } from "./session-file.ts";
 import { ensureConfigDir, withConfigDir } from "./paths.ts";
 
+// `security add-generic-password -U` is an upsert: without this guard a test
+// saveSession would overwrite the developer's real keychain entry on macOS.
+process.env.SNS_DISABLE_KEYCHAIN ??= "1";
+
 test("pkce challenge is base64url(hex(sha256(verifier)))", () => {
   const verifier = "sns-pkce-verifier-example";
   expect(pkceChallenge(verifier)).toBe(

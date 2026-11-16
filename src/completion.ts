@@ -33,6 +33,7 @@ export const SUBCOMMANDS = [
   "search",
   "show",
   "copy",
+  "sink",
   "completion",
   "help",
 ] as const;
@@ -84,8 +85,10 @@ function stageFor(words: string[], cword: number): Stage {
 
   const command = args[0] ?? "";
   if (command === "completion" && current === 0) return { kind: "shells", partial };
-  if ((command === "show" || command === "copy") && current === 0) return { kind: "noteIds", partial };
-  if (command === "copy" && current === 1) {
+  if ((command === "show" || command === "copy" || command === "sink") && current === 0) {
+    return { kind: "noteIds", partial };
+  }
+  if ((command === "copy" || command === "sink") && current === 1) {
     return { kind: "keys", partial, noteQuery: args[1] ?? "" };
   }
   if (command === "logout" && current === 0) return { kind: "logoutFlag", partial };

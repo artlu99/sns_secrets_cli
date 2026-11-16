@@ -55,7 +55,7 @@ Designed to move with you without dragging secrets into the wrong place:
 
 Config lives in `~/.config/sn_secrets_cli/` (or `SNS_CONFIG_DIR`): plain `.env` (email, API URL), dotenvx-encrypted `.env.session`, optional `.env.keys` when there is no OS secret service, and `cache.db` (whole-file `chacha20`). Details: [SECURITY.md](SECURITY.md).
 
-Tab completion for `show` / `copy` (note ids, then setting keys):
+Tab completion for `show` / `copy` / `sink` (note ids, then setting keys):
 
 ```bash
 eval "$(sns completion bash)"   # or: eval "$(sns completion zsh)"
@@ -70,6 +70,7 @@ sns list --tag <tag-or-folder>
 sns search <query>
 sns show <id>
 sns copy <id> <key>
+sns sink <id> <key> <path>   # value → a 0600 file, never displayed (agent handoff)
 sns                 # interactive browse
 sns sync
 sns logout
@@ -77,7 +78,7 @@ sns doctor
 sns completion bash|zsh
 ```
 
-`<id>` is a note uuid, a uuid prefix (≥ 8 hex chars), or a title prefix that matches exactly one note. `show` prints prose and a key inventory with values withheld; `copy` puts one value on the clipboard and prints only a byte count (`copied API_KEY (32 bytes, clears in 30s)`). On a settings note, `copy` without a key lists keys and does nothing. `list` / `search` hide key-bearing crypto items unless `--all`; search snippets are cut from masked text. No command writes plaintext note bodies to a temp file.
+`<id>` is a note uuid, a uuid prefix (≥ 8 hex chars), or a title prefix that matches exactly one note. `show` prints prose and a key inventory with values withheld; `copy` puts one value on the clipboard and prints only a byte count (`copied API_KEY (32 bytes, clears in 30s)`). On a settings note, `copy` without a key lists keys and does nothing. `sink` writes one value straight to a `0600` file — the value never touches the screen or the clipboard; deleting the file is the reader's job (see [SECURITY.md](SECURITY.md) for handoff-directory guidance). `list` / `search` hide key-bearing crypto items unless `--all`; search snippets are cut from masked text. No command writes plaintext note bodies to a temp file.
 
 ```text
 staging api

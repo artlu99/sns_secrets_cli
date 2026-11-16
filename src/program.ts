@@ -7,6 +7,7 @@ import { loginCommand } from "./commands/login.ts";
 import { logoutCommand } from "./commands/logout.ts";
 import { searchCommand } from "./commands/search.ts";
 import { showCommand } from "./commands/show.ts";
+import { sinkCommand } from "./commands/sink.ts";
 import { syncCommand } from "./commands/sync.ts";
 import { tagsCommand } from "./commands/tags.ts";
 import {
@@ -82,6 +83,17 @@ export function buildProgram(): Command {
     .argument("<id>", "uuid or title prefix")
     .argument("[key]", "exact setting name; omit to list the note's keys")
     .action(copyCommand);
+
+  program
+    .command("sink")
+    .description("write one setting value to a 0600 file (agent handoff; the value is never displayed)")
+    .argument("<id>", "uuid or title prefix")
+    .argument("<key>", "exact setting name")
+    .argument("<path>", "destination file (created 0600; must not exist without --force)")
+    .option("--force", "overwrite an existing file (still 0600)")
+    .action(async (id: string, key: string, path: string, options: { force?: boolean }) => {
+      await sinkCommand(id, key, path, options);
+    });
 
   program
     .command("completion")

@@ -1,5 +1,19 @@
 import { AsyncLocalStorage } from "node:async_hooks";
-import { chmodSync, existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import {
+  chmodSync,
+  closeSync,
+  constants,
+  existsSync,
+  fchmodSync,
+  mkdirSync,
+  openSync,
+  readdirSync,
+  readFileSync,
+  renameSync,
+  rmSync,
+  writeFileSync,
+  writeSync,
+} from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
 
@@ -90,13 +104,54 @@ export function readPlainConfig(): PlainConfig {
   return { email, apiUrl: apiUrl.replace(/\/+$/, "") };
 }
 
+/** The keys writePlainConfig owns; anything else in the file survives rewrites. */
+const OWNED_ENV_KEYS = new Set(["SN_EMAIL", "SN_API_URL"]);
+
 export function writePlainConfig(patch: Partial<PlainConfig>): void {
   ensureConfigDir();
   const current = readPlainConfig();
   const email = patch.email ?? current.email;
   const apiUrl = patch.apiUrl ?? current.apiUrl;
-  writeFileSync(envPath(), `SN_EMAIL=${email}\nSN_API_URL=${apiUrl}\n`, { mode: 0o600 });
+  // Operators keep hand-added lines: every rewrite carries them through
+  // instead of truncating the file to the two keys this program owns.
+  const preserved: string[] = [];
+  if (existsSync(envPath())) {
+    for (const line of readFileSync(envPath(), "utf8").split("\n")) {
+      const key = line.match(/^\s*([A-Za-z_][A-Za-z0-9_]*)\s*=/);
+      if (key === null || !OWNED_ENV_KEYS.has(key[1]!)) preserved.push(line);
+    }
+  }
+  const tail = preserved.length > 0 ? `${preserved.join("\n").replace(/\n*$/, "")}\n` : "";
+  writeFileSync(envPath(), `SN_EMAIL=${email}\nSN_API_URL=${apiUrl}\n${tail}`, { mode: 0o600 });
   chmodSync(envPath(), 0o600);
+}
+
+/**
+ * Crash-safe write for credential files: temp file created O_EXCL|O_NOFOLLOW
+ * at 0600, fully written and fchmod-asserted, then atomically renamed over
+ * the destination — a crash never leaves a partial or half-written secret,
+ * and a planted symlink at the destination is replaced, never written
+ * through. Callers ensure the directory exists.
+ */
+export function writePrivateFileSync(path: string, data: string): void {
+  const tmp = `${path}.tmp-${process.pid}-${Math.random().toString(36).slice(2, 8)}`;
+  const fd = openSync(tmp, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW ?? 0), 0o600);
+  try {
+    const buffer = Buffer.from(data, "utf8");
+    let written = 0;
+    while (written < buffer.length) written += writeSync(fd, buffer, written);
+    fchmodSync(fd, 0o600);
+  } catch (error) {
+    try {
+      rmSync(tmp, { force: true });
+    } catch {
+      // a partial 0600 temp file is the worst case; the next write retries
+    }
+    throw error;
+  } finally {
+    closeSync(fd);
+  }
+  renameSync(tmp, path);
 }
 
 const ALLOWED_CONFIG_FILES = new Set([

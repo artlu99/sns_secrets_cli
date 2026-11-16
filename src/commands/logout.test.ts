@@ -5,6 +5,9 @@ import { join } from "node:path";
 import { logoutCommand } from "./logout.ts";
 import { ensureConfigDir, sessionPath, withConfigDir } from "../paths.ts";
 
+// A test logout must never touch the developer's real keychain entry.
+process.env.SNS_DISABLE_KEYCHAIN ??= "1";
+
 test("logout without a session is a clear error", async () => {
   const dir = mkdtempSync(join(tmpdir(), "sns-logout0-"));
   try {

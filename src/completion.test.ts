@@ -50,6 +50,7 @@ test("subcommand completion filters by prefix", () => {
   expect(completeArgv(["sns", "sh"], 1, null)).toEqual(["show"]);
   expect(completeArgv(["sns"], 1, null)).toContain("copy");
   expect(completeArgv(["sns"], 1, null)).toContain("completion");
+  expect(completeArgv(["sns"], 1, null)).toContain("sink");
 });
 
 test("completion shell argument lists bash and zsh", () => {
@@ -81,6 +82,18 @@ test("copy's second argument completes setting keys for the resolved note", () =
     expect(keys).toEqual(["API_KEY", "DB_HOST"]);
     expect(completeArgv(["sns", "copy", "Staging", "DB"], 3, db)).toEqual(["DB_HOST"]);
     expect(completeArgv(["sns", "copy", "nope", ""], 3, db)).toEqual([]);
+  } finally {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("sink's key argument completes like copy's; its path slot gets no candidates", () => {
+  const { dir, db } = seededDb();
+  try {
+    expect(completeArgv(["sns", "sink", "Staging", ""], 3, db)).toEqual(["API_KEY", "DB_HOST"]);
+    expect(completeArgv(["sns", "sink", "Staging", "DB", "/run/user/0/t"], 3, db)).toEqual(["DB_HOST"]);
+    expect(completeArgv(["sns", "sink", "Staging", "API_KEY", ""], 4, db)).toEqual([]);
   } finally {
     db.close();
     rmSync(dir, { recursive: true, force: true });

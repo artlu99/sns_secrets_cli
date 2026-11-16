@@ -1,9 +1,9 @@
-import { chmodSync, existsSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, readFileSync, rmSync } from "node:fs";
 import { parse, set } from "@dotenvx/dotenvx";
 import { UserError } from "./errors.ts";
 import { SESSION_VALUE_KEYS, assertSessionKeyNames, type SessionValueKey } from "./env.ts";
 import { keychainDelete, keychainGet, keychainPut, secretServiceAvailable } from "./keychain.ts";
-import { ensureConfigDir, keysPath, sessionPath } from "./paths.ts";
+import { ensureConfigDir, keysPath, sessionPath, writePrivateFileSync } from "./paths.ts";
 
 process.env.DOTENV_CONFIG_QUIET ??= "true";
 
@@ -46,10 +46,7 @@ export async function readPrivateKey(): Promise<string | null> {
 
 function writePrivateKeyFile(key: string): void {
   ensureConfigDir();
-  writeFileSync(keysPath(), `# dotenvx private key for .env.session\nDOTENV_PRIVATE_KEY_SESSION=${key}\n`, {
-    mode: 0o600,
-  });
-  chmodSync(keysPath(), 0o600);
+  writePrivateFileSync(keysPath(), `# dotenvx private key for .env.session\nDOTENV_PRIVATE_KEY_SESSION=${key}\n`);
 }
 
 /** Move the dotenvx private key into the OS keychain when one exists. */
@@ -105,7 +102,12 @@ export async function saveSession(secrets: SessionSecrets): Promise<{ keychain: 
     // .env.keys to disk on every save would undo what the keychain is for.
   } else {
     const existing = keychainKey ?? readPrivateKeyFile();
-    if (existing && !existsSync(keysPath())) writePrivateKeyFile(existing);
+    // Only materialize custody into a file when there is an existing session
+    // to decrypt. On a fresh login dotenvx must bootstrap its own keypair:
+    // it refuses to overwrite an existing .env.keys during bootstrap, so a
+    // pre-written private-only file leaves the real keypair stranded in
+    // process memory and the session bricked (found by review).
+    if (existing && !existsSync(keysPath()) && existsSync(sessionPath())) writePrivateKeyFile(existing);
   }
   // dotenvx prompts for private-key custody on a TTY unless CI is set.
   // File custody bootstraps the keypair; the keychain move happens after.

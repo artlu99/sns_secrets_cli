@@ -29,6 +29,10 @@ function run(command: string, args: string[], stdin?: string): Promise<{ code: n
 
 /** The OS secret service answered. A missing item still counts as available. */
 export async function secretServiceAvailable(): Promise<boolean> {
+  // Test escape hatch: `security add-generic-password -U` is an upsert, so a
+  // test calling saveSession would clobber the developer's real keychain
+  // entry on macOS. Tests set this before touching saveSession.
+  if (process.env.SNS_DISABLE_KEYCHAIN === "1") return false;
   if (process.platform === "darwin") return Bun.which("security") !== null;
   if (process.platform !== "linux") return false;
   if (Bun.which("secret-tool") === null) return false;
