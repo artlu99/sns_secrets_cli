@@ -1,6 +1,6 @@
 [package]
 name = "sns"
-version = "0.3.0"
+version = "0.4.0"
 edition = "2024"
 description = "Portable sns binary — Rust port of the TypeScript CLI in ../src (catch-up, not tip of spear)"
 
