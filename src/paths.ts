@@ -107,6 +107,23 @@ export function readPlainConfig(): PlainConfig {
 /** The keys writePlainConfig owns; anything else in the file survives rewrites. */
 const OWNED_ENV_KEYS = new Set(["SN_EMAIL", "SN_API_URL"]);
 
+/**
+ * Every file sns creates in the config directory. `sns purge` deletes
+ * exactly these; anything else in the directory is left in place and named
+ * (the same set doctor's unexpected-files check flags).
+ */
+export const KNOWN_CONFIG_FILES = new Set([
+  ".env",
+  ".env.session",
+  ".env.keys",
+  "cache.db",
+  "cache.db-journal",
+  "cache.db-wal",
+  "cache.db-shm",
+  "sync.lock",
+  "clipboard-clear-at",
+]);
+
 export function writePlainConfig(patch: Partial<PlainConfig>): void {
   ensureConfigDir();
   const current = readPlainConfig();
@@ -154,19 +171,7 @@ export function writePrivateFileSync(path: string, data: string): void {
   renameSync(tmp, path);
 }
 
-const ALLOWED_CONFIG_FILES = new Set([
-  ".env",
-  ".env.session",
-  ".env.keys",
-  "cache.db",
-  "cache.db-journal",
-  "cache.db-wal",
-  "cache.db-shm",
-  "sync.lock",
-  "clipboard-clear-at",
-]);
-
 export function unexpectedConfigFiles(): string[] {
   if (!existsSync(configDir())) return [];
-  return readdirSync(configDir()).filter((name) => !ALLOWED_CONFIG_FILES.has(name));
+  return readdirSync(configDir()).filter((name) => !KNOWN_CONFIG_FILES.has(name));
 }

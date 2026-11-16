@@ -74,6 +74,7 @@ sns sink <id> <key> <path>   # value → a 0600 file, never displayed (agent han
 sns                 # interactive browse
 sns sync
 sns logout
+sns purge -y        # delete the entire local config dir (never touches the server)
 sns doctor
 sns completion bash|zsh
 ```

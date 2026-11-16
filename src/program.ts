@@ -5,6 +5,7 @@ import { doctorCommand } from "./commands/doctor.ts";
 import { listCommand } from "./commands/list.ts";
 import { loginCommand } from "./commands/login.ts";
 import { logoutCommand } from "./commands/logout.ts";
+import { purgeCommand } from "./commands/purge.ts";
 import { searchCommand } from "./commands/search.ts";
 import { showCommand } from "./commands/show.ts";
 import { sinkCommand } from "./commands/sink.ts";
@@ -44,6 +45,14 @@ export function buildProgram(): Command {
     .option("--delete-cache", "also delete the encrypted cache")
     .action(async (options: { deleteCache?: boolean }) => {
       await logoutCommand(options);
+    });
+
+  program
+    .command("purge")
+    .description("delete the entire local config directory (offline; never touches the server)")
+    .option("-y, --yes", "skip the confirmation prompt (required when not a terminal)")
+    .action(async (options: { yes?: boolean }) => {
+      await purgeCommand(options);
     });
 
   program.command("sync").description("pull and decrypt notes into the encrypted cache").action(syncCommand);

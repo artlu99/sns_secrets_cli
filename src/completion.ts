@@ -27,6 +27,7 @@ export const SUBCOMMANDS = [
   "doctor",
   "login",
   "logout",
+  "purge",
   "sync",
   "tags",
   "list",

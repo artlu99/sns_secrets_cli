@@ -2,7 +2,7 @@
 
 `sns` stores synced notes and session credentials as ciphertext. One private key opens all of them. Two postures decide where that key lives: the OS keychain, or a file next to the ciphertext. They are the same program on two kinds of machine; what differs is what a disk thief gets away with. The planned third posture — an off-box OpenBao server as the store of record, with the machine holding only a revocable lease — is deferred, not built: its design lives in docs/bao.md. Consumer machines never run sns at all: values reach them through narrow OpenBao paths the operator pushes by hand (docs/bao.md), so no deploy job ever holds a key that unlocks more than its own paths.
 
-Local files stay until `sns logout`. There is no idle timeout and no automatic wipe.
+Local files stay until `sns logout`. There is no idle timeout and no automatic wipe. `sns purge` is the scorched-earth complement: it deletes every file sns created in the config directory — a cache whose key is long gone included — and removes the directory, but it is offline by design and never revokes the server session; run `logout` first when the session should end.
 
 ## The unlock chain
 
