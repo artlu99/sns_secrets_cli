@@ -145,13 +145,15 @@ fn disk_backed_warning(_path: &str) -> Option<String> {
 }
 
 #[cfg(target_os = "linux")]
-const TMPFS_MAGIC: libc::c_long = 0x01021994;
+const TMPFS_MAGIC: i64 = 0x01021994;
 
 /// The filesystem type id of the directory's mount, or an error when the
 /// path is gone. FFI like lock.rs's flock: the wrapper owns the struct and
-/// the raw pointer never escapes.
+/// the raw pointer never escapes. f_type is c_long on glibc but u64 on
+/// musl — widened to i64 so both targets compile; the values involved are
+/// small positive constants.
 #[cfg(target_os = "linux")]
-fn statfs_type(dir: &Path) -> std::io::Result<libc::c_long> {
+fn statfs_type(dir: &Path) -> std::io::Result<i64> {
     let c_path = std::ffi::CString::new(dir.as_os_str().to_str().ok_or_else(|| {
         std::io::Error::new(std::io::ErrorKind::InvalidInput, "path is not valid unicode")
     })?)?;
@@ -160,7 +162,7 @@ fn statfs_type(dir: &Path) -> std::io::Result<libc::c_long> {
     if result != 0 {
         return Err(std::io::Error::last_os_error());
     }
-    Ok(stats.f_type)
+    Ok(stats.f_type as i64)
 }
 
 
