@@ -157,6 +157,17 @@ pub fn completion_script(shell: &str) -> Result<String, UserError> {
     }
 }
 
+/// Candidates are printed one per line and rendered by readline/zle, so any
+/// control character (C0, DEL, C1) would corrupt the line protocol or smuggle
+/// terminal escapes into the completion display — every CSI/OSC sequence
+/// needs ESC or the lone-C1 CSI introducer, both in this class. Such
+/// titles/keys are simply not offered (the note's uuid prefix still is);
+/// they are never rewritten, so an offered candidate always resolves exactly
+/// as typed. (Port of the TS completion CONTROL_CHARS filter.)
+fn has_control_chars(value: &str) -> bool {
+    value.chars().any(|c| matches!(c, '\u{0}'..='\u{1f}' | '\u{7f}'..='\u{9f}'))
+}
+
 fn note_id_candidates(db: Option<&CacheDb>) -> Vec<String> {
     let Some(db) = db else {
         return Vec::new();
@@ -193,7 +204,7 @@ fn note_id_candidates(db: Option<&CacheDb>) -> Vec<String> {
     let mut seen = std::collections::HashSet::new();
     for row in &rows {
         let title = row.4.clone().unwrap_or_default().trim().to_string();
-        if !title.is_empty() && !seen.contains(&title) && resolves(&title) {
+        if !title.is_empty() && !has_control_chars(&title) && !seen.contains(&title) && resolves(&title) {
             seen.insert(title.clone());
             out.push(title);
         }
@@ -219,7 +230,11 @@ fn key_candidates(db: Option<&CacheDb>, note_query: &str) -> Vec<String> {
     let Ok(row) = resolve_note(db, note_query, false) else {
         return Vec::new();
     };
-    note_settings(&row.1, &row.5).keys().cloned().collect()
+    note_settings(&row.1, &row.5)
+        .keys()
+        .filter(|key| !has_control_chars(key))
+        .cloned()
+        .collect()
 }
 
 fn filter_prefix(candidates: &[&str], partial: &str) -> Vec<String> {
@@ -398,6 +413,47 @@ mod tests {
             complete_argv(&words(&["sns", "copy", "sta"]), 2, Some(&temp.0)),
             vec!["Staging"]
         );
+    }
+
+    #[test]
+    fn control_character_titles_are_never_offered_uuids_still_are() {
+        let path = std::env::temp_dir().join(format!("sns-complete-controls-{}.db", std::process::id()));
+        remove_cache_files(&path);
+        let db = open_database(&path, &"ab".repeat(32)).expect("opens");
+        let esc_title = "\u{1b}[31mesc\u{1b}[0m";
+        db.upsert_items(&[
+            (
+                "99999999-8888-7777-6666-555555555555".into(),
+                "Note".into(),
+                3,
+                0,
+                Some(esc_title.into()),
+                serde_json::json!({ "title": esc_title, "text": "prose" }).to_string(),
+            ),
+            (
+                "cccccccc-dddd-eeee-ffff-000000000000".into(),
+                "Note".into(),
+                4,
+                0,
+                Some("multi\nline".into()),
+                serde_json::json!({ "title": "multi\nline", "text": "prose" }).to_string(),
+            ),
+        ])
+        .expect("seed");
+        let temp = TempDb(db, path);
+
+        let candidates = complete_argv(&words(&["sns", "show", ""]), 2, Some(&temp.0));
+        for candidate in &candidates {
+            assert!(
+                !candidate.chars().any(|c| matches!(c, '\u{0}'..='\u{1f}' | '\u{7f}'..='\u{9f}')),
+                "control bytes in candidate {candidate:?}"
+            );
+        }
+        assert!(!candidates.contains(&esc_title.to_string()));
+        assert!(!candidates.contains(&"multi".to_string()));
+        // the poisoned notes stay reachable by their uuid prefix
+        assert!(candidates.iter().any(|s| s == "99999999"));
+        assert!(candidates.iter().any(|s| s == "cccccccc"));
     }
 
     #[test]

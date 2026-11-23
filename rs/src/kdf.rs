@@ -38,11 +38,17 @@ pub struct KdfParams {
 }
 
 /// Derived credentials. The master key encrypts locally; the server password
-/// authenticates. Both are zeroized when dropped.
-#[derive(Debug)]
+/// authenticates. Both are zeroized when dropped, and Debug never shows
+/// either — a key in a panic message or a log line is a leaked key.
 pub struct RootKey {
     pub master_key: Zeroizing<[u8; 32]>,
     pub server_password: Zeroizing<[u8; 32]>,
+}
+
+impl core::fmt::Debug for RootKey {
+    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
+        f.debug_struct("RootKey").finish_non_exhaustive()
+    }
 }
 
 impl RootKey {
@@ -168,6 +174,29 @@ mod tests {
         .expect("vector derivation succeeds");
         assert_eq!(root.master_key_hex(), VECTOR_MASTER);
         assert_eq!(root.server_password_hex(), VECTOR_SERVER);
+    }
+
+    /// Debug is the one accidental exit for key material — a panic or a log
+    /// that prints the struct must not carry either derived secret.
+    #[test]
+    fn root_key_debug_carries_no_key_material() {
+        let root = derive_root_key(
+            VECTOR_PASSWORD,
+            &KdfParams {
+                version: "004".into(),
+                identifier: VECTOR_IDENTIFIER.into(),
+                pw_nonce: VECTOR_PW_NONCE.into(),
+                iterations: None,
+                memory: None,
+                parallelism: None,
+            },
+        )
+        .expect("vector derivation succeeds");
+        let debugged = format!("{root:?}");
+        assert!(!debugged.contains(VECTOR_MASTER), "debug leaks the master key: {debugged}");
+        assert!(!debugged.contains(VECTOR_SERVER), "debug leaks the server password: {debugged}");
+        assert!(!debugged.contains(&hex::encode(root.master_key.as_slice())));
+        assert!(debugged.contains("RootKey"), "debug still identifies the type: {debugged}");
     }
 
     /// Digest computed independently (Bun CryptoHasher), not by this module —

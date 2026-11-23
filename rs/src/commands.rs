@@ -15,16 +15,17 @@ use crate::keychain;
 use crate::kdf::derive_root_key;
 use crate::lock::acquire_sync_lock;
 use crate::notes::{
+    sanitize_text,
     tag_forest,
     format_when, json_string, list_notes, note_body, note_scan, pad_end, plan_copy,
-    render_copy_keys, render_note_inventory, render_tag_groups, resolve_note, resolve_tag,
-    search_notes, tag_graph, tagged_note_uuids, CopyPlan, ListOptions, ListedNote, ListedTag,
-    PROSE_TYPES,
+    render_copy_keys, render_note_inventory, render_tag_groups, render_untagged_table,
+    resolve_note, resolve_tag, search_notes, tag_graph, tagged_note_uuids, CopyPlan,
+    ListOptions, ListedNote, ListedTag, PROSE_TYPES,
 };
 use crate::pager::{page_if_tall, write_stdout, PageOptions};
 use crate::paths::{
     config_dir, db_path, ensure_config_dir, env_path, keys_path, read_plain_config, session_path,
-    unexpected_config_files, write_plain_config, KNOWN_CONFIG_FILES,
+    unexpected_config_files, write_plain_config, DEFAULT_API_URL, KNOWN_CONFIG_FILES,
 };
 use crate::prompt::{prompt_confirm, prompt_line, prompt_secret};
 use crate::session_file::{delete_session, load_session, persist, save_session, session_key_names};
@@ -129,10 +130,10 @@ pub fn doctor_checks() -> Vec<Check> {
 }
 
 fn config_check() -> Check {
-    let readable: Result<(), String> = {
-        ensure_config_dir();
-        std::fs::read_to_string(env_path()).map(|_| ()).map_err(|error| error.to_string())
-    };
+    let readable: Result<(), String> = ensure_config_dir()
+        .map(|_| ())
+        .map_err(|error| error.to_string())
+        .and_then(|()| std::fs::read_to_string(env_path()).map(|_| ()).map_err(|error| error.to_string()));
     match readable {
         Ok(()) => Check {
             name: "config",
@@ -423,7 +424,7 @@ pub fn doctor_command() -> i32 {
 
 pub fn login_command() -> Result<(), UserError> {
     intro("login");
-    let plain = read_plain_config();
+    let plain = read_plain_config()?;
     // Always confirm the email so a saved SN_EMAIL is not a dead end — Enter
     // keeps it; typing another address is the escape hatch for a different account.
     let email = prompt_line(
@@ -445,7 +446,12 @@ pub fn login_command() -> Result<(), UserError> {
         match load_session() {
             Ok(secrets) => secrets,
             Err(error) => {
-                eprintln!("the existing session is unreadable and will be replaced ({error})");
+                // Parse errors embed file bytes; sanitize like every other
+                // local sink (this one bypasses main's boundary).
+                eprintln!(
+                    "the existing session is unreadable and will be replaced ({})",
+                    sanitize_text(&error.to_string())
+                );
                 None
             }
         }
@@ -456,10 +462,12 @@ pub fn login_command() -> Result<(), UserError> {
         && !session.account_email.is_empty()
         && session.account_email != email
     {
+        // account_email is server-derived and reaches the prompt raw —
+        // sanitize it like every other untrusted string.
         let switch = prompt_confirm(
             &format!(
                 "session belongs to {} — logout and continue as {email}?",
-                session.account_email
+                sanitize_text(&session.account_email)
             ),
             false,
         )?;
@@ -474,7 +482,7 @@ pub fn login_command() -> Result<(), UserError> {
     }
     // The typed email is persisted only once the account switch is settled —
     // declining must leave .env pointing at the account still logged in.
-    write_plain_config(Some(&email), Some(&plain.api_url));
+    write_plain_config(Some(&email), Some(&plain.api_url))?;
 
     let db_key = existing
         .as_ref()
@@ -517,7 +525,12 @@ pub fn clear_session(delete_cache: bool) -> Result<bool, UserError> {
         match load_session() {
             Ok(secrets) => secrets,
             Err(error) => {
-                eprintln!("cannot read the session to revoke it server-side ({error})");
+                // Local display sinks bypass main's sanitized error boundary,
+                // so file- and server-derived text is sanitized here too.
+                eprintln!(
+                    "cannot read the session to revoke it server-side ({})",
+                    sanitize_text(&error.to_string())
+                );
                 None
             }
         }
@@ -525,8 +538,23 @@ pub fn clear_session(delete_cache: bool) -> Result<bool, UserError> {
         return Err(UserError("not logged in".into()));
     };
 
-    let plain = read_plain_config();
+    // Logout is the recovery path: a config that fails the https gate must
+    // not strand the secrets it exists to delete. Revoke best-effort against
+    // the default host instead (parity with the TS clearSession fallback).
+    let plain = read_plain_config().unwrap_or_else(|error| {
+        eprintln!("cannot read .env ({})", sanitize_text(&error.to_string()));
+        crate::paths::PlainConfig { email: String::new(), api_url: DEFAULT_API_URL.to_string() }
+    });
     let api = api_client(&plain.api_url)?;
+
+    // Hold the sync lock across the whole logout. The revoke below may
+    // refresh the access token first (with_access -> persist), and a refresh
+    // racing a running sync's own refresh rotates the refresh token twice —
+    // one rotation invalidates the other, leaving either the sync or the
+    // revoke holding a dead token. It also keeps the deletion below from
+    // pulling the ground out of that sync's writes. (Parity with the TS
+    // clearSession, which takes the lock before the same revoke.)
+    let release = acquire_sync_lock(30_000)?;
     let mut revoked = false;
     if let Some(secrets) = &secrets {
         // Refresh first if needed, so logout works after the access token
@@ -534,13 +562,16 @@ pub fn clear_session(delete_cache: bool) -> Result<bool, UserError> {
         let mut run = |current: &SessionSecrets| api.logout(current);
         match with_access(secrets, &mut persist, &api, now_ms() as u64, &mut run) {
             Ok(()) => revoked = true,
-            Err(error) => eprintln!("server revoke failed ({error}); local secrets will still be deleted"),
+            // ApiError summaries embed up to 180 characters of
+            // server-supplied tag/message text: sanitize before it touches
+            // the terminal (this sink never passes through main's boundary).
+            Err(error) => eprintln!(
+                "server revoke failed ({}); local secrets will still be deleted",
+                sanitize_text(&error.to_string())
+            ),
         }
     }
 
-    // Hold the sync lock: deleting cache.db under a running sync would send
-    // its writes into a deleted inode while it reports success.
-    let release = acquire_sync_lock(30_000)?;
     delete_session();
     if delete_cache {
         remove_cache_files(&db_path());
@@ -742,7 +773,7 @@ pub fn sync_command() -> Result<(), UserError> {
     let Some(secrets) = load_session()? else {
         return Err(UserError("not logged in — run sns login".into()));
     };
-    let plain = read_plain_config();
+    let plain = read_plain_config()?;
     if plain.email.is_empty() {
         return Err(UserError("SN_EMAIL is empty — run sns login".into()));
     }
@@ -795,11 +826,15 @@ pub fn list_command(kind: Option<&str>, tag: Option<&str>, limit: usize, all: bo
         println!("{label} {where_clause}{hint}");
         return Ok(());
     }
-    let graph = match resolved_tag {
-        Some((graph, _)) => graph,
-        None => tag_graph(&db).map_err(UserError::from)?,
+    // A tagless cache renders flat: no Tag rows means every note is untagged,
+    // so the graph's two full content passes are skipped entirely.
+    let table = match resolved_tag {
+        Some((graph, _)) => render_tag_groups(&graph, &notes),
+        None if db.count_tags().map_err(UserError::from)? > 0 => {
+            render_tag_groups(&tag_graph(&db).map_err(UserError::from)?, &notes)
+        }
+        None => render_untagged_table(&notes),
     };
-    let table = render_tag_groups(&graph, &notes);
     // one terminal-only hint that <id> accepts a title or a uuid, prefix is
     // enough; omitted when piped so a script reading the table gets a table.
     // page_if_tall counts the hint lines, so a table that fits with its hint

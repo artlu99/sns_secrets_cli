@@ -96,6 +96,10 @@ pub fn open_database(path: &Path, db_key: &str) -> Result<CacheDb, DbError> {
         return Err(DbError::User("database key must be 64 hex characters".into()));
     }
     let conn = open_connection(path)?;
+    // The key reaches the pragma as one string literal. A bound parameter is
+    // not an option here: this amalgamation's pragma grammar only accepts
+    // name/number tokens, so the 64-hex validation above is the guard, and
+    // it is checked before any SQL is built.
     conn.execute_batch(&format!(
         "PRAGMA cipher = 'chacha20';\
          PRAGMA key = '{db_key}';\
@@ -164,7 +168,17 @@ pub fn remove_cache_files(path: &Path) {
 }
 
 /// The MIGRATIONS list from db.ts, applied in order on every open.
-pub const MIGRATIONS: &[&str] = &["ALTER TABLE sync_state ADD COLUMN stored_types TEXT"];
+pub const MIGRATIONS: &[&str] = &[
+    "ALTER TABLE sync_state ADD COLUMN stored_types TEXT",
+    // Precomputed trash flag so the list/search paths stop JSON.parsing every
+    // body just to drop one row; upsert_items keeps it current from content.
+    "ALTER TABLE items ADD COLUMN trashed INTEGER NOT NULL DEFAULT 0",
+    // Backfill for rows written before the column. The CASE guard keeps a row
+    // whose content is not valid JSON from raising mid-migration, and
+    // json_type = 'true' matches is_trashed's strict boolean exactly (the
+    // JSON number 1 reads as 'integer', not trash).
+    "UPDATE items SET trashed = 1 WHERE CASE WHEN json_valid(content) THEN json_type(content, '$.trashed') END = 'true'",
+];
 
 const SCHEMA: &str = "
 CREATE TABLE IF NOT EXISTS items (
@@ -213,6 +227,14 @@ impl CacheDb {
             .map_err(DbError::from)
     }
 
+    /// Live tag rows — the `list` render path skips building the tag graph
+    /// entirely when this reads zero (a tagless cache renders flat).
+    pub fn count_tags(&self) -> Result<i64, DbError> {
+        self.conn
+            .query_row("SELECT count(*) AS n FROM items WHERE content_type = 'Tag' AND deleted = 0", [], |row| row.get(0))
+            .map_err(DbError::from)
+    }
+
     /// TS returns nulls when the row is absent (fresh cache, never synced).
     pub fn read_sync_state(&self) -> Result<SyncState, DbError> {
         Ok(self
@@ -246,24 +268,28 @@ impl CacheDb {
     }
 
     /// Upsert items; a newer stored row wins (`WHERE excluded.updated_at >=`).
+    /// The trashed flag is derived from content at this one write chokepoint,
+    /// so every synced row carries a queryable flag readers never re-parse.
     pub fn upsert_items(&self, rows: &[ItemRow]) -> Result<(), DbError> {
         let tx = self.conn.unchecked_transaction().map_err(DbError::from)?;
         {
             let mut stmt = tx
                 .prepare(
-                    "INSERT INTO items (uuid, content_type, updated_at, deleted, title, content)
-                     VALUES (?1, ?2, ?3, ?4, ?5, ?6)
+                    "INSERT INTO items (uuid, content_type, updated_at, deleted, title, content, trashed)
+                     VALUES (?1, ?2, ?3, ?4, ?5, ?6, ?7)
                      ON CONFLICT(uuid) DO UPDATE SET
                        content_type = excluded.content_type,
                        updated_at   = excluded.updated_at,
                        deleted      = excluded.deleted,
                        title        = excluded.title,
-                       content      = excluded.content
+                       content      = excluded.content,
+                       trashed      = excluded.trashed
                      WHERE excluded.updated_at >= items.updated_at",
                 )
                 .map_err(DbError::from)?;
             for (uuid, content_type, updated_at, deleted, title, content) in rows {
-                stmt.execute(params![uuid, content_type, updated_at, deleted, title, content])
+                let trashed = i64::from(crate::notes::is_trashed(content));
+                stmt.execute(params![uuid, content_type, updated_at, deleted, title, content, trashed])
                     .map_err(DbError::from)?;
             }
         }
@@ -301,9 +327,19 @@ mod tests {
         std::path::Path::new(env!("CARGO_MANIFEST_DIR")).join("tests/fixtures/cache-v0.2.0.db")
     }
 
+    /// The fixture migrates in place on open (user_version catches up to the
+    /// MIGRATIONS it has never seen), so every test that opens a working
+    /// cache runs on a temp copy and the tracked file stays byte-for-byte.
+    fn fixture_copy(tag: &str) -> std::path::PathBuf {
+        let copy = std::env::temp_dir().join(format!("sns-db-fixture-{tag}.db"));
+        std::fs::copy(fixture_path(), &copy).expect("fixture copies");
+        copy
+    }
+
     #[test]
     fn opens_the_typescript_written_cache() {
-        let db = open_database(&fixture_path(), FIXTURE_KEY).expect("TS cache opens");
+        let copy = fixture_copy("open");
+        let db = open_database(&copy, FIXTURE_KEY).expect("TS cache opens");
         assert!(db.sqlite_master_count().expect("count") >= 5);
         assert_eq!(db.count_items().expect("count"), 3);
         let state = db.read_sync_state().expect("sync state");
@@ -312,6 +348,7 @@ mod tests {
         let stored = state.stored_types.as_deref().expect("stored types");
         assert!(stored.contains("Note") && stored.contains("SN|ItemsKey"));
         db.close();
+        remove_cache_files(&copy);
     }
 
     #[test]
@@ -406,12 +443,89 @@ mod tests {
         // in the TS→Rust direction. The Rust→TS direction is verified by the
         // bun check in RELEASE-style docs: open a Rust-written cache with
         // `bun -e 'import {openDatabase} from "./src/db.ts"'`.
-        let db = open_database(&fixture_path(), FIXTURE_KEY).expect("opens");
+        let copy = fixture_copy("format");
+        let db = open_database(&copy, FIXTURE_KEY).expect("opens");
         let notes = db.items_for_type("Note").expect("notes");
         assert_eq!(notes.len(), 1, "the deleted note stays out of the read path");
         assert_eq!(notes[0].0, "22222222-2222-4222-8222-222222222222");
         assert_eq!(notes[0].4.as_deref(), Some("Pins"));
         db.close();
+        remove_cache_files(&copy);
+    }
+
+    #[test]
+    fn upsert_maintains_the_trashed_column_from_content() {
+        let path = std::env::temp_dir().join("sns-db-test-trash-upsert.db");
+        remove_cache_files(&path);
+        let db = open_database(&path, FIXTURE_KEY).expect("fresh cache opens");
+        let flag_of = |db: &CacheDb, uuid: &str| -> i64 {
+            db.conn
+                .query_row("SELECT trashed FROM items WHERE uuid = ?1", params![uuid], |row| row.get(0))
+                .expect("trashed flag")
+        };
+        db.upsert_items(&[(
+            "77777777-7777-4777-8777-777777777777".into(),
+            "Note".into(),
+            1_000,
+            0,
+            Some("Bin".into()),
+            r#"{"title":"Bin","trashed":true}"#.into(),
+        )])
+        .expect("upsert");
+        assert_eq!(flag_of(&db, "77777777-7777-4777-8777-777777777777"), 1);
+        // a newer version that left the trash keeps the column current
+        db.upsert_items(&[(
+            "77777777-7777-4777-8777-777777777777".into(),
+            "Note".into(),
+            2_000,
+            0,
+            Some("Back".into()),
+            r#"{"text":"restored"}"#.into(),
+        )])
+        .expect("upsert");
+        assert_eq!(flag_of(&db, "77777777-7777-4777-8777-777777777777"), 0);
+        db.close();
+        remove_cache_files(&path);
+    }
+
+    #[test]
+    fn the_trashed_column_backfills_caches_from_older_builds() {
+        let path = std::env::temp_dir().join("sns-db-test-trash-backfill.db");
+        remove_cache_files(&path);
+        let db = open_database(&path, FIXTURE_KEY).expect("fresh cache opens");
+        // rows written by an older build, then rewind the schema to its state
+        // before the trashed column existed: the reopen must re-run the real
+        // ALTER and backfill trash from the content JSON
+        for (uuid, stamp, title, content) in [
+            ("77777777-7777-4777-8777-777777777777", 3_000, "Bin", r#"{"trashed":true}"#),
+            ("88888888-8888-4888-8888-888888888888", 2_000, "Kept", r#"{"text":"stay"}"#),
+        ] {
+            db.conn
+                .execute(
+                    "INSERT INTO items (uuid, content_type, updated_at, deleted, title, content)
+                     VALUES (?1, 'Note', ?2, 0, ?3, ?4)",
+                    params![uuid, stamp, title, content],
+                )
+                .expect("legacy row");
+        }
+        db.conn.execute("ALTER TABLE items DROP COLUMN trashed", []).expect("schema rewound");
+        db.conn.pragma_update(None, "user_version", 1).expect("version rewound");
+        db.close();
+        let db = open_database(&path, FIXTURE_KEY).expect("migrating reopen");
+        let version: i64 = db.conn.query_row("PRAGMA user_version", [], |row| row.get(0)).expect("user_version");
+        assert_eq!(version as usize, MIGRATIONS.len(), "migrations recorded");
+        let bin: i64 = db
+            .conn
+            .query_row("SELECT trashed FROM items WHERE uuid = '77777777-7777-4777-8777-777777777777'", [], |row| row.get(0))
+            .expect("trash flag");
+        assert_eq!(bin, 1);
+        let kept: i64 = db
+            .conn
+            .query_row("SELECT trashed FROM items WHERE uuid = '88888888-8888-4888-8888-888888888888'", [], |row| row.get(0))
+            .expect("kept flag");
+        assert_eq!(kept, 0);
+        db.close();
+        remove_cache_files(&path);
     }
 
     /// Leaves /tmp/sns-rust-written-cache.db behind for the bun cross-check:

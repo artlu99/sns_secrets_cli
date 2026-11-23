@@ -1603,6 +1603,7 @@ dependencies = [
  "serde_json",
  "sha2",
  "terminal_size",
+ "url",
  "zeroize",
 ]
 

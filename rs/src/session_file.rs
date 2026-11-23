@@ -29,10 +29,20 @@ fn read_private_key_file() -> Option<String> {
     None
 }
 
-fn write_private_key_file(key: &str) {
-    crate::paths::ensure_config_dir();
-    write_secret_file(&keys_path(), &format!("# sns session private key\n{PRIVATE_KEY_FIELD}={key}\n")).expect("keys file writes");
+fn write_private_key_file(key: &str) -> Result<(), UserError> {
+    crate::paths::ensure_config_dir()?;
+    write_secret_file(
+        &keys_path(),
+        &format!("# sns session private key\n{PRIVATE_KEY_FIELD}={key}\n"),
+    )
+    .map_err(|error| {
+        UserError(format!(
+            "could not write .env.keys at {} — check that the directory is writable and the disk is not full ({error})",
+            keys_path().display()
+        ))
+    })?;
     set_mode_600(&keys_path());
+    Ok(())
 }
 
 fn pairs(secrets: &SessionSecrets) -> Vec<(&'static str, String)> {
@@ -62,7 +72,7 @@ pub fn save_session(secrets: &SessionSecrets) -> Result<SaveOutcome, UserError> 
     if !is_64_hex(&secrets.db_key) {
         return Err(UserError("refusing to store a database key that is not 64 hex characters".into()));
     }
-    crate::paths::ensure_config_dir();
+    crate::paths::ensure_config_dir()?;
     let keychain_key = keychain::keychain_get();
     let existing = keychain_key.clone().or_else(read_private_key_file);
     let (private, public) = match existing {
@@ -84,7 +94,12 @@ pub fn save_session(secrets: &SessionSecrets) -> Result<SaveOutcome, UserError> 
         })
         .collect::<Result<Vec<_>, UserError>>()?;
     let file = render_session_file(&public, &fields);
-    write_secret_file(&session_path(), &file).map_err(|error| UserError(error.to_string()))?;
+    write_secret_file(&session_path(), &file).map_err(|error| {
+        UserError(format!(
+            "could not write the session file at {} — check that the directory is writable and the disk is not full ({error})",
+            session_path().display()
+        ))
+    })?;
     set_mode_600(&session_path());
 
     // Custody: the OS keychain wins; .env.keys (mode 0600) is the fallback.
@@ -92,7 +107,7 @@ pub fn save_session(secrets: &SessionSecrets) -> Result<SaveOutcome, UserError> 
     if keychain {
         let _ = std::fs::remove_file(keys_path());
     } else {
-        write_private_key_file(&private.to_hex());
+        write_private_key_file(&private.to_hex())?;
     }
     Ok(SaveOutcome { keychain })
 }

@@ -60,7 +60,10 @@ pub fn write_osc(sequence: &str) -> bool {
 /// to the child as fd 3, which the sleeper writes to with `>&3`.
 fn arm_clear(sequence: &str) {
     use std::os::unix::io::AsRawFd;
-    ensure_config_dir();
+    // The clear marker is best-effort — a copy that cannot create the config
+    // directory still went out; the marker write below is tolerated the same
+    // way.
+    let _ = ensure_config_dir();
     let marker = format!("{}", now_ms() + 30_000);
     let _ = std::fs::write(clipboard_marker_path(), marker);
     let tty = std::fs::OpenOptions::new().write(true).open("/dev/tty");

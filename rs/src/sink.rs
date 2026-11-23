@@ -72,6 +72,9 @@ fn write_and_verify(file: &std::fs::File, value: &str, path: &Path) -> Result<()
     file.set_permissions(std::fs::Permissions::from_mode(0o600))
         .map_err(|error| UserError(error.to_string()))?;
     file.write_all(value.as_bytes()).map_err(|error| UserError(error.to_string()))?;
+    // The handoff value is one-shot and irreplaceable (a fresh sink refuses
+    // existing targets): the fd closes only after the bytes are on the device.
+    file.sync_all().map_err(|error| UserError(error.to_string()))?;
     let meta = file.metadata().map_err(|error| UserError(error.to_string()))?;
     let mode = meta.permissions().mode() & 0o777;
     if mode != 0o600 {
@@ -187,7 +190,7 @@ mod tests {
         std::fs::create_dir_all(&dir).unwrap();
         crate::keychain::disable_for_tests();
         crate::paths::with_config_dir(dir.to_str().unwrap(), || {
-            crate::paths::ensure_config_dir();
+            crate::paths::ensure_config_dir().expect("config dir creates");
             let secrets = SessionSecrets {
                 account_email: "me@example.com".into(),
                 refresh_token: "refresh-1".into(),

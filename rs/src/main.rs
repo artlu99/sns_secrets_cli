@@ -167,8 +167,12 @@ fn main() {
 
     if let Err(error) = result {
         // SNS_DEBUG=1 prints stack traces on the TS side; Result errors carry
-        // no backtrace here, so the Display message is all we have.
-        eprintln!("{error}");
+        // no backtrace here, so the Display message is all we have. This is
+        // the one boundary every command failure prints through: server
+        // error text (ApiError summaries) and note-derived text (titles in
+        // UserErrors) are sanitized before they touch the terminal, matching
+        // the TS top-level catch.
+        eprintln!("{}", sns::notes::sanitize_text(&error.to_string()));
         std::process::exit(1);
     }
 }

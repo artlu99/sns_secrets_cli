@@ -110,8 +110,10 @@ pub fn list_notes(db: &CacheDb, options: ListOptions<'_>) -> Result<Vec<ListedNo
     // would make SQLite raise mid-query and kill the whole listing. Trashed
     // is filtered in code, where every other parser tolerates bad content.
     let mut clauses = vec!["deleted = 0".to_string()];
+    let mut parameters: Vec<&str> = Vec::new();
     if let Some(kind) = options.kind {
-        clauses.push(format!("content_type = '{}'", kind.replace('\'', "''")));
+        clauses.push(format!("content_type = ?{}", parameters.len() + 1));
+        parameters.push(kind);
     } else if options.all {
         // --all means "plus key-bearing items" — never tag rows, which would
         // otherwise land in the (untagged) group as junk
@@ -128,7 +130,9 @@ pub fn list_notes(db: &CacheDb, options: ListOptions<'_>) -> Result<Vec<ListedNo
     ))?;
     // Rows stream lazily so the limit stops the scan — a 2,000-note cache
     // never materializes behind `limit 100`.
-    let rows = statement.query_map([], content_row).map_err(db_error)?;
+    let rows = statement
+        .query_map(rusqlite::params_from_iter(parameters.iter()), content_row)
+        .map_err(db_error)?;
     let mut listed = Vec::new();
     for row in rows {
         let (uuid, content_type, updated_at, title, content) = row.map_err(db_error)?;
@@ -147,7 +151,7 @@ pub fn list_notes(db: &CacheDb, options: ListOptions<'_>) -> Result<Vec<ListedNo
         if options.env && settings == 0 {
             continue;
         }
-        let title = title.unwrap_or_else(|| label(&content_type));
+        let title = sanitize_text(&title.unwrap_or_else(|| label(&content_type)));
         listed.push(ListedNote {
             uuid,
             content_type,
@@ -213,11 +217,22 @@ pub fn search_notes(db: &CacheDb, query: &str, options: ListOptions<'_>) -> Resu
         if !visible_types.contains(&content_type.as_str()) {
             continue;
         }
-        let title = title.unwrap_or_default();
+        let title = sanitize_text(&title.unwrap_or_default());
         let haystack = format!("{title}\n{content}");
         let matched = match &pattern {
             Some(pattern) => pattern.is_match(&haystack).unwrap_or(false),
-            None => haystack.to_lowercase().contains(&needle),
+            // One copy per row, not two: ASCII text (the cache's whole body,
+            // overwhelmingly) lowercases in place; non-ASCII falls back to
+            // the full Unicode mapping, byte-for-byte as before.
+            None => {
+                if haystack.is_ascii() {
+                    let mut lowered = haystack;
+                    lowered.make_ascii_lowercase();
+                    lowered.contains(&needle)
+                } else {
+                    haystack.to_lowercase().contains(&needle)
+                }
+            }
         };
         if !matched {
             continue;
@@ -283,21 +298,35 @@ fn whitespace_collapse(text: &str) -> String {
 
 /// An assignment line as the parser sees one: optional `export`, the key
 /// charset, `=`, then a quoted span (which may cross lines) or the line's
-/// rest.
+/// rest. The line may start with any non-identifier character — a rejected
+/// `(KEY=…)` or `#KEY=…` shape carries the same quoted continuation lines a
+/// line-start one does, so its anchor is as wide as the fragment mask's.
 ///
 /// Collapse every assignment-shaped line to `KEY=[redacted]` — quoted spans,
 /// unclosed quotes, and unquoted values included — then mask rejected inline
-/// fragments the way the show inventory does. The line-level pass runs first
-/// because the fragment mask cannot catch a quoted value's continuation
-/// lines: masking the decoded body this way is what lets a snippet be cut
-/// from text a value may have once been in.
+/// fragments the way the show inventory does. Escape sequences go first, so
+/// a code cannot hide an assignment shape from either pass. The line-level
+/// pass runs first because the fragment mask cannot catch a quoted value's
+/// continuation lines: masking the decoded body this way is what lets a
+/// snippet be cut from text a value may have once been in. The key must not
+/// be preceded by an identifier character — a negative lookbehind, so the
+/// anchor consumes nothing and an assignment fused to the previous match's
+/// tail (`K1="a"K2="b"`) still masks; the `regex` crate has no lookaround,
+/// so this pass runs on `fancy_regex`.
 fn mask_assignments(text: &str) -> String {
-    static ASSIGNMENT_LINE: std::sync::OnceLock<StdRegex> = std::sync::OnceLock::new();
+    static ASSIGNMENT_LINE: std::sync::OnceLock<FancyRegex> = std::sync::OnceLock::new();
     let pattern = ASSIGNMENT_LINE.get_or_init(|| {
-        StdRegex::new(r#"(?m)^[ \t]*(?:export[ \t]+)?([A-Za-z0-9_.-]+)[ \t]*=(?:"[^"]*"|'[^']*'|`[^`]*`|[^\n]*)"#)
-            .expect("static pattern")
+        FancyRegex::new(
+            r#"(?m)(?<![A-Za-z0-9_])[ \t]*(?:export[ \t]+)?([A-Za-z0-9_.-]+)[ \t]*=(?:"[^"]*"|'[^']*'|`[^`]*`|[^\n]*)"#,
+        )
+        .expect("static pattern")
     });
-    redact_assignments(&pattern.replace_all(text, "${1}=[redacted]"))
+    redact_assignments(
+        // replace_all is infallible here (no Result): the pattern is linear
+        // (no nested repetition), so the fancy-regex backtracking limit is
+        // unreachable on attacker-shaped input.
+        &pattern.replace_all(&sanitize_text(text), "${1}=[redacted]"),
+    )
 }
 
 /// The only text a search snippet may be cut from, so matching full content
@@ -308,7 +337,7 @@ fn mask_assignments(text: &str) -> String {
 fn snippet_source(row: &ItemRow) -> String {
     match prose_text(&row.1, &row.5) {
         Some(decoded) => mask_assignments(&decoded),
-        None => redact_assignments(&note_body(row).body),
+        None => redact_assignments(&sanitize_text(&note_body(row).body)),
     }
 }
 
@@ -481,10 +510,10 @@ pub struct TagGraph {
     pub parent_of: HashMap<String, Option<String>>,
 }
 
-/// Tag titles render and resolve everywhere, so whitespace is normalized
-/// once here.
+/// Tag titles render and resolve everywhere, so whitespace is normalized and
+/// terminal escape sequences stripped once here.
 fn normalize_title(title: Option<&str>) -> String {
-    let normalized = whitespace_collapse(title.unwrap_or_default());
+    let normalized = whitespace_collapse(&sanitize_text(title.unwrap_or_default()));
     if normalized.trim().is_empty() {
         "(untitled)".to_string()
     } else {
@@ -879,27 +908,57 @@ fn copy_hint(query: &str, first_key: &str) -> String {
     format!("copy a value:  sns copy {} {}", shellish(query), first_key)
 }
 
-/// Drop CSI escape sequences from note-derived text the inventory wraps in
-/// its own styling — a comment carrying codes could otherwise reset or
-/// restyle our line. Also done before masking so it sees what the codes were
-/// hiding.
-fn strip_sgr(text: &str) -> String {
-    static SGR: std::sync::OnceLock<StdRegex> = std::sync::OnceLock::new();
-    let pattern = SGR.get_or_init(|| StdRegex::new(r"\x1b\[[0-9;:?]*[A-Za-z]").expect("static pattern"));
-    pattern.replace_all(text, "").into_owned()
+/// Strip terminal escape sequences from note- and server-derived text before
+/// a display sink draws it — our styling goes around the result, and a
+/// poisoned note or error message never gets to restyle, wipe, or retitle
+/// the pane. Removes CSI sequences whatever their final byte (not just SGR
+/// `m`: cursor moves and private modes too), OSC strings closed by BEL or ST
+/// (window titles, hyperlinks; an unterminated one is cut to the end of the
+/// text, since its payload has no honest end), DCS/APC/PM strings, and the
+/// leftover bare control bytes: C0 except newline and tab, a lone ESC, DEL,
+/// and the C1 range (a lone 0x9B reopens CSI parsing on some terminals).
+/// Structured sequences go first, so the ESC that opened a real sequence is
+/// never eaten alone and left to print its payload raw. (Port of the TS
+/// `sanitizeText`.)
+pub fn sanitize_text(text: &str) -> String {
+    static CSI: std::sync::OnceLock<StdRegex> = std::sync::OnceLock::new();
+    static OSC: std::sync::OnceLock<StdRegex> = std::sync::OnceLock::new();
+    static STRING_LIKE: std::sync::OnceLock<StdRegex> = std::sync::OnceLock::new();
+    static CONTROL: std::sync::OnceLock<StdRegex> = std::sync::OnceLock::new();
+    let csi = CSI.get_or_init(|| StdRegex::new(r"\x1b\[[0-?]*[ -/]*[@-~]").expect("static pattern"));
+    let osc = OSC.get_or_init(|| StdRegex::new(r"\x1b\][\s\S]*?(?:\x07|\x1b\\|$)").expect("static pattern"));
+    let string_like =
+        STRING_LIKE.get_or_init(|| StdRegex::new(r"\x1b[P^_][\s\S]*?(?:\x07|\x1b\\|$)").expect("static pattern"));
+    let control = CONTROL.get_or_init(|| StdRegex::new(r"[\x00-\x08\x0b-\x1f\x7f-\x9f]").expect("static pattern"));
+    let without_csi = csi.replace_all(text, "");
+    let without_osc = osc.replace_all(&without_csi, "");
+    let without_strings = string_like.replace_all(&without_osc, "");
+    control.replace_all(&without_strings, "").into_owned()
 }
 
 /// Mask `key=value` fragments in free text the inventory renders verbatim.
 /// The parser rejects these lines (a commented-out `# OLD_KEY=…`, a mention
-/// mid-sentence), so a value written that way would otherwise reach stdout —
-/// the one thing this view promises never happens. Only display: parsing
-/// itself is untouched.
+/// mid-sentence, one in parentheses or quotes), so a value written that way
+/// would otherwise reach stdout — the one thing this view promises never
+/// happens. An assignment counts when a line start or any non-identifier
+/// character precedes the key, so punctuation- and quote-prefixed fragments
+/// mask too; a quoted value's whole quoted span (quotes included, lines
+/// crossed) masks with it, so a multi-word or multi-line value never leaks
+/// its tail; a candidate fused into a longer identifier never matches on its
+/// own — the greedy key class absorbs the run, so `my_fooBAR=x` masks as the
+/// one assignment its full token already is, and `run=` with no value after
+/// the `=` (base64 padding) masks nothing. Only display: parsing itself is
+/// untouched. (Port of the TS `redactAssignments`, matching its widened
+/// prefix class, quoted-value masking, and non-consuming lookbehind anchor.)
 pub fn redact_assignments(text: &str) -> String {
-    static FRAGMENT: std::sync::OnceLock<StdRegex> = std::sync::OnceLock::new();
+    static FRAGMENT: std::sync::OnceLock<FancyRegex> = std::sync::OnceLock::new();
     let pattern = FRAGMENT.get_or_init(|| {
-        StdRegex::new(r"(?m)(^|[ \t])([A-Za-z0-9_.-]+)[ \t]*=[ \t]*\S+").expect("static pattern")
+        FancyRegex::new(r#"(?m)(?<![A-Za-z0-9_])([A-Za-z0-9_.-]+)[ \t]*=(?:"[^"]*"|'[^']*'|`[^`]*`|[ \t]*\S+)"#)
+            .expect("static pattern")
     });
-    pattern.replace_all(text, "${1}${2}=[redacted]").into_owned()
+    // Infallible replace_all — same linear-pattern reasoning as
+    // `mask_assignments`.
+    pattern.replace_all(text, "${1}=[redacted]").into_owned()
 }
 
 /// The `sns show` inventory for a note with settings: its title, the prose
@@ -912,8 +971,9 @@ pub fn redact_assignments(text: &str) -> String {
 /// markers dim via `color`, with the key names popping by contrast. Pure so
 /// tests can pin the layout.
 pub fn render_note_inventory(input: RenderInventoryInput<'_>) -> String {
-    let lines_top = note_header(input.title, input.color);
-    let prose = redact_assignments(input.prose);
+    let title = sanitize_text(input.title);
+    let lines_top = note_header(&title, input.color);
+    let prose = redact_assignments(&sanitize_text(input.prose));
     let prose = trim_trailing_newlines(&prose);
     let mut lines = vec![lines_top];
     if !prose.trim().is_empty() {
@@ -930,7 +990,7 @@ pub fn render_note_inventory(input: RenderInventoryInput<'_>) -> String {
             None => lines.push(label),
             Some(comment) => lines.push(format!(
                 "{label}  {}",
-                input.color.italic(&input.color.gray(&strip_sgr(&redact_assignments(comment))))
+                input.color.italic(&input.color.gray(&redact_assignments(&sanitize_text(comment))))
             )),
         }
     }
@@ -1076,20 +1136,8 @@ pub fn render_tag_groups(graph: &TagGraph, notes: &[ListedNote]) -> String {
         measure(&children_of, &placed, &mut count_of, tag);
     }
 
-    let flatten = |text: &str| whitespace_collapse(text);
-    let width_title = notes.iter().map(|note| flatten(&note.title).chars().count()).max().unwrap_or(0).max(5);
-    let width_when = notes.iter().map(|note| format_when(note.updated_at).chars().count()).max().unwrap_or(0).max(16);
-    let width_settings = notes.iter().map(|note| note.settings.to_string().len()).max().unwrap_or(0).max(1);
-    let row_line = |note: &ListedNote, _depth: usize| {
-        let fields = [
-            pad_end(&flatten(&note.title), width_title),
-            pad_end(&format_when(note.updated_at), width_when),
-            format!("{:>width$}", note.settings, width = width_settings),
-            note.uuid.clone(),
-        ];
-        let joined = fields.join("  ");
-        joined.trim_end().to_string()
-    };
+    let widths = list_row_widths(notes);
+    let row_line = |note: &ListedNote, _depth: usize| list_row_line(note, widths);
     let indent = |depth: usize| "  ".repeat(depth);
     let row_indented = |note: &ListedNote, depth: usize| format!("{}{}", indent(depth + 1), row_line(note, depth));
 
@@ -1161,14 +1209,53 @@ pub fn render_tag_groups(graph: &TagGraph, notes: &[ListedNote]) -> String {
         if !out.is_empty() {
             out.push(String::new());
         }
-        out.push(format!("{UNTAGGED} ({})", untagged.len()));
-        let mut sorted: Vec<&&ListedNote> = untagged.iter().collect();
-        sorted.sort_by(|a, b| b.updated_at.cmp(&a.updated_at).then_with(|| locale_cmp(&a.uuid, &b.uuid)));
-        for note in sorted {
-            out.push(row_line(note, 0));
-        }
+        out.extend(untagged_block(&untagged, widths));
     }
     out.join("\n")
+}
+
+/// The list row's three column widths (title, when, settings), computed over
+/// the listed notes — shared by the grouped and flat renderers so both draw
+/// identical rows.
+fn list_row_widths(notes: &[ListedNote]) -> (usize, usize, usize) {
+    let width_title = notes.iter().map(|note| whitespace_collapse(&note.title).chars().count()).max().unwrap_or(0).max(5);
+    let width_when = notes.iter().map(|note| format_when(note.updated_at).chars().count()).max().unwrap_or(0).max(16);
+    let width_settings = notes.iter().map(|note| note.settings.to_string().len()).max().unwrap_or(0).max(1);
+    (width_title, width_when, width_settings)
+}
+
+fn list_row_line(note: &ListedNote, widths: (usize, usize, usize)) -> String {
+    let (width_title, width_when, width_settings) = widths;
+    let fields = [
+        pad_end(&whitespace_collapse(&note.title), width_title),
+        pad_end(&format_when(note.updated_at), width_when),
+        format!("{:>width$}", note.settings, width = width_settings),
+        note.uuid.clone(),
+    ];
+    let joined = fields.join("  ");
+    joined.trim_end().to_string()
+}
+
+/// The `(untagged)` block: its header, then the rows newest-first (uuid as
+/// the tie-break). Shared by the grouped renderer and the flat fallback.
+fn untagged_block(untagged: &[&ListedNote], widths: (usize, usize, usize)) -> Vec<String> {
+    let mut out = vec![format!("{UNTAGGED} ({})", untagged.len())];
+    let mut sorted: Vec<&&ListedNote> = untagged.iter().collect();
+    sorted.sort_by(|a, b| b.updated_at.cmp(&a.updated_at).then_with(|| locale_cmp(&a.uuid, &b.uuid)));
+    for note in sorted {
+        out.push(list_row_line(note, widths));
+    }
+    out
+}
+
+/// The flat fallback `sns list` renders when the cache holds no tag rows at
+/// all: byte-identical to `render_tag_groups` over a tagless graph, computed
+/// without building the graph — no tags means every note is untagged, and
+/// the two full content passes the graph needs are pure waste.
+pub fn render_untagged_table(notes: &[ListedNote]) -> String {
+    let widths = list_row_widths(notes);
+    let refs: Vec<&ListedNote> = notes.iter().collect();
+    untagged_block(&refs, widths).join("\n")
 }
 
 fn measure(
@@ -1177,9 +1264,30 @@ fn measure(
     count_of: &mut HashMap<String, usize>,
     tag: &str,
 ) -> usize {
+    // Per-root visited set: a tag-parent cycle (server-supplied references)
+    // must not recurse until the stack dies — the TS renderTagGroups walk
+    // carries the same guard. A second way around a loop adds 0; the counts
+    // a cycle produces are deterministic but inherently ill-defined.
+    let mut seen: std::collections::HashSet<String> = std::collections::HashSet::new();
+    measure_walk(children_of, placed, count_of, tag, &mut seen)
+}
+
+fn measure_walk(
+    children_of: &HashMap<String, Vec<String>>,
+    placed: &HashMap<String, Vec<&ListedNote>>,
+    count_of: &mut HashMap<String, usize>,
+    tag: &str,
+    seen: &mut std::collections::HashSet<String>,
+) -> usize {
+    if !seen.insert(tag.to_string()) {
+        return 0;
+    }
     let children = children_of.get(tag).map(Vec::as_slice).unwrap_or(&[]);
     let total = placed.get(tag).map(|rows| rows.len()).unwrap_or(0)
-        + children.iter().map(|child| measure(children_of, placed, count_of, child)).sum::<usize>();
+        + children
+            .iter()
+            .map(|child| measure_walk(children_of, placed, count_of, child, seen))
+            .sum::<usize>();
     count_of.insert(tag.to_string(), total);
     total
 }

@@ -5,9 +5,9 @@ use sns::commands::{inventory_text, render_tag_tree};
 use sns::db::{open_database, remove_cache_files, ItemRow};
 use sns::errors::UserError;
 use sns::notes::{InventoryColor,
-    list_notes, list_tags, note_settings, plan_copy, render_copy_keys, render_note_inventory,
-    render_tag_groups, resolve_note, resolve_tag, search_notes, tag_graph, tagged_note_uuids,
-    CopyPlan, ListOptions,
+    list_notes, list_tags, note_settings, plan_copy, redact_assignments, render_copy_keys,
+    render_note_inventory, render_tag_groups, render_untagged_table, resolve_note, resolve_tag,
+    sanitize_text, search_notes, tag_graph, tagged_note_uuids, CopyPlan, ListOptions,
 };
 
 fn row(uuid: &str, content_type: &str, updated_at: i64, deleted: i64, title: Option<&str>, content: String) -> ItemRow {
@@ -44,6 +44,29 @@ fn list(db: &sns::db::CacheDb, limit: usize) -> Vec<sns::notes::ListedNote> {
 
 fn plain() -> ListOptions<'static> {
     ListOptions { kind: None, limit: 10, all: false, tag_uuids: None, env: false, regex: false }
+}
+
+/// A cache with no tag rows renders flat, and the flat table is byte-identical
+/// to the grouped renderer over a tagless graph — that equivalence is what
+/// lets `sns list` skip building the graph (two full content passes) for a
+/// tagless cache.
+#[test]
+fn a_tagless_cache_renders_the_same_flat_table_without_the_graph() {
+    let temp = temp_db("tagless");
+    temp.0.upsert_items(
+        &[
+            note("ffff5000-1111-1111-1111-111111111111", 2_000, "Alpha", json(serde_json::json!({ "title": "Alpha", "text": "A=1" }))),
+            note("ffff5000-2222-2222-2222-222222222222", 1_000, "Beta", json(serde_json::json!({ "title": "Beta", "text": "plain" }))),
+        ],
+    )
+    .expect("seed");
+    assert_eq!(temp.0.count_tags().expect("tag count"), 0);
+    let notes = list(&temp.0, 10);
+    let flat = render_untagged_table(&notes);
+    let grouped = render_tag_groups(&tag_graph(&temp.0).expect("graph"), &notes);
+    assert_eq!(flat, grouped, "the flat table is the grouped table over a tagless graph");
+    assert_eq!(flat.split('\n').next(), Some("(untagged) (2)"));
+    assert!(flat.contains("Alpha") && flat.contains("Beta"));
 }
 
 #[test]
@@ -396,6 +419,34 @@ fn explicit_folder_nesting_does_not_depend_on_tag_row_order() {
     .expect("seed");
     let tags = list_tags(&temp.0).expect("tags");
     assert_eq!(tags.iter().find(|tag| tag.title == "child").expect("child").parent.as_deref(), Some(parent));
+}
+
+#[test]
+fn a_tag_parent_cycle_renders_instead_of_crashing_list() {
+    let temp = temp_db("cycle");
+    let a = "aaaa0000-1111-1111-1111-111111111111";
+    let b = "aaaa0000-2222-2222-2222-222222222222";
+    let one = "aaaa0000-3333-3333-3333-333333333333";
+    let two = "aaaa0000-4444-4444-4444-444444444444";
+    temp.0
+        .upsert_items(&[
+            // explicit parent refs pointing at each other: a server-supplied
+            // cycle. tag_depths cuts cycles for nesting; the header-count
+            // walk (measure) needs its own guard or it recurses to death.
+            row(a, "Tag", 2_000, 0, Some("cycle-a"), json(serde_json::json!({ "title": "cycle-a", "references": [{ "uuid": b, "content_type": "Tag" }, { "uuid": one, "content_type": "Note" }] }))),
+            row(b, "Tag", 1_000, 0, Some("cycle-b"), json(serde_json::json!({ "title": "cycle-b", "references": [{ "uuid": a, "content_type": "Tag" }, { "uuid": two, "content_type": "Note" }] }))),
+            note(one, 4_000, "one", json(serde_json::json!({ "title": "one", "text": "x", "references": [{ "uuid": a, "content_type": "Tag" }] }))),
+            note(two, 3_000, "two", json(serde_json::json!({ "title": "two", "text": "y", "references": [{ "uuid": b, "content_type": "Tag" }] }))),
+        ])
+        .expect("seed");
+
+    // Must terminate; before the per-root visited set this recursed until
+    // the stack died. Counts inside a cycle are walk-order-dependent (the
+    // graph is ill-defined), so only crash-freedom and once-only rendering
+    // are pinned here.
+    let table = render_tag_groups(&tag_graph(&temp.0).expect("graph"), &list(&temp.0, 10));
+    assert_eq!(table.matches("aaaa0000-3333").count(), 1);
+    assert_eq!(table.matches("aaaa0000-4444").count(), 1);
 }
 
 #[test]
@@ -779,4 +830,125 @@ fn note_settings_counts_remain_available_per_row() {
     let none = note_settings("SN|ItemsKey", &json(serde_json::json!({ "itemsKey": "x" })));
     assert_eq!(none.len(), 0);
     let _ = UserError("type reference keeps the import honest".into());
+}
+
+#[test]
+fn redact_assignments_masks_assignments_whatever_punctuation_precedes_the_key() {
+    // the three shapes that used to print verbatim in show prose and snippets:
+    // parenthesized, quoted, and comment-prefixed
+    assert_eq!(redact_assignments("(API_KEY=hunter2)"), "(API_KEY=[redacted]");
+    assert_eq!(redact_assignments("\"TOKEN=abc123\""), "\"TOKEN=[redacted]");
+    assert_eq!(redact_assignments("#OLD_KEY=zzz"), "#OLD_KEY=[redacted]");
+    // every assignment in a multiline body masks — line starts included
+    assert_eq!(
+        redact_assignments("A=1\n(B=2)\n#C=3"),
+        "A=[redacted]\n(B=[redacted]\n#C=[redacted]"
+    );
+    // a quoted value is masked by its whole quoted span — quotes included —
+    // so a multi-word value never leaks the words after the first token
+    assert_eq!(redact_assignments("(API_KEY=\"secret value here\")"), "(API_KEY=[redacted])");
+    assert_eq!(redact_assignments("see KEY='a b c' tail"), "see KEY=[redacted] tail");
+    // a key fused into a longer identifier run masks as the whole run — `BAR`
+    // inside `my_fooBAR` is never matched on its own (the parser keys the same
+    // full token), and with no value after the `=` nothing masks at all
+    assert_eq!(redact_assignments("my_fooBAR=x"), "my_fooBAR=[redacted]");
+    assert_eq!(redact_assignments("my_fooBAR="), "my_fooBAR=");
+    assert_eq!(redact_assignments("ends with base64 cGFzc3dvcmQ="), "ends with base64 cGFzc3dvcmQ=");
+    // assignments fused together — a consuming anchor would swallow the
+    // closing quote and leave the second value print — both mask
+    assert_eq!(
+        redact_assignments("OLD_TOKEN=\"abc\"NEW_TOKEN=\"def\""),
+        "OLD_TOKEN=[redacted]NEW_TOKEN=[redacted]"
+    );
+}
+
+#[test]
+fn a_search_snippet_masks_assignments_that_punctuation_or_quotes_precede() {
+    let temp = temp_db("snippet-prefix");
+    temp.0
+        .upsert_items(&[note(
+            "dddddddd-2222-2222-2222-222222222222",
+            2_000,
+            "Masks",
+            json(serde_json::json!({
+                "title": "Masks",
+                "text": "see (API_KEY=hunter2) here\n\"#TOKEN=abc123\" quoted\n#OLD_KEY=zzz tail\nends my_fooBAR=\n(TOKEN=\"hunter2\nsecond-line-hunter2\") tail"
+            })),
+        )])
+        .expect("seed");
+    let by_punct = search_notes(&temp.0, "hunter2", plain()).expect("search");
+    assert_eq!(by_punct.len(), 1);
+    assert!(by_punct[0].snippet.contains("(API_KEY=[redacted]"));
+    assert!(!by_punct[0].snippet.contains("hunter2"));
+    let by_quoted = search_notes(&temp.0, "abc123", plain()).expect("search");
+    assert_eq!(by_quoted.len(), 1);
+    assert!(by_quoted[0].snippet.contains("\"#TOKEN=[redacted]"));
+    assert!(!by_quoted[0].snippet.contains("abc123"));
+    let by_comment = search_notes(&temp.0, "zzz", plain()).expect("search");
+    assert_eq!(by_comment.len(), 1);
+    assert!(by_comment[0].snippet.contains("#OLD_KEY=[redacted]"));
+    assert!(!by_comment[0].snippet.contains("zzz"));
+    // the identifier-fused, valueless shape (`=` with nothing after it) is
+    // prose — it prints verbatim, base64 padding included
+    let by_continuation = search_notes(&temp.0, "ends", plain()).expect("search");
+    assert_eq!(by_continuation.len(), 1);
+    assert!(by_continuation[0].snippet.contains("ends my_fooBAR="));
+    // a punctuation-prefixed quoted value spanning lines: the line-level mask
+    // catches the whole quoted span (continuation lines included), so a hit
+    // on the value's second line still shows nothing
+    let multiline = search_notes(&temp.0, "second-line-hunter2", plain()).expect("search");
+    assert_eq!(multiline.len(), 1);
+    assert!(multiline[0].snippet.contains("TOKEN=[redacted]"));
+    assert!(!multiline[0].snippet.contains("second-line-hunter2"));
+    assert!(!multiline[0].snippet.contains("hunter2"));
+}
+
+#[test]
+fn sanitize_text_strips_terminal_escapes_and_keeps_plain_text_newlines_and_tabs() {
+    assert_eq!(sanitize_text("plain text stays"), "plain text stays");
+    assert_eq!(sanitize_text("a\nb\tc"), "a\nb\tc");
+    // CSI beyond SGR: erase-screen, cursor-home, private modes
+    assert_eq!(sanitize_text("x\x1b[2J\x1b[Hy\x1b[?25lz"), "xyz");
+    // OSC closed by BEL (window title) and by ST (an OSC 8 hyperlink pair)
+    assert_eq!(sanitize_text("a\x1b]0;window title\x07b"), "ab");
+    assert_eq!(sanitize_text("a\x1b]8;;http://evil.test\x1b\\click\x1b]8;;\x1b\\b"), "aclickb");
+    // an unterminated OSC has no honest end: the rest of the text goes with it
+    assert_eq!(sanitize_text("keep\x1b]0;swallow"), "keep");
+    // DCS/APC/PM strings, lone ESC, DEL, and C1 bytes
+    assert_eq!(sanitize_text("a\x1bP$data\x1b\\b\x1b_appc\x07c"), "abc");
+    assert_eq!(sanitize_text("d\x1be"), "de");
+    assert_eq!(sanitize_text("a\u{9b}31mb"), "a31mb");
+    assert_eq!(sanitize_text("a\u{85}b\u{7f}c"), "abc");
+}
+
+#[test]
+fn render_note_inventory_sanitizes_note_supplied_title_prose_and_comments() {
+    use sns::note_env::Settings;
+    use sns::notes::{PlainInventoryColor, RenderInventoryInput};
+    let settings: Settings = Settings::from_iter([("A".to_string(), "1".to_string())]);
+    let comments: Settings = Settings::from_iter([(
+        "A".to_string(),
+        "# host\x1b]8;;http://evil.test\x1b\\hint\x1b]8;;\x1b\\".to_string(),
+    )]);
+    let text = render_note_inventory(RenderInventoryInput {
+        title: "staging\x1b]0;pwned\x07 api",
+        settings: &settings,
+        comments: &comments,
+        prose: "red \x1b[31mprose\x1b[0m here\n\ttabbed line kept\n\x1b[?25l",
+        query: "staging",
+        terminal: false,
+        color: &PlainInventoryColor,
+    });
+    let lines: Vec<&str> = text.split('\n').collect();
+    // the title renders clean, separator length and all
+    assert_eq!(lines[0], "staging api");
+    assert_eq!(lines[1], "───────────");
+    // prose keeps its newlines and tabs; only the escapes go
+    assert_eq!(lines[2], "red prose here");
+    assert_eq!(lines[3], "\ttabbed line kept");
+    assert!(!text.contains('\x1b'));
+    assert!(!text.contains('\u{7}'));
+    assert!(!text.contains('\u{9b}'));
+    // the comment's hyperlink wrapper is gone, its text stays
+    assert!(text.contains("A=[redacted]  # hosthint"));
 }
