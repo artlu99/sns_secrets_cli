@@ -7,12 +7,15 @@ import { openDatabase, upsertItems, type ItemRow } from "./db.ts";
 import {
   listNotes,
   listTags,
+  noteBody,
   planCopy,
+  redactAssignments,
   renderCopyKeys,
   renderNoteInventory,
   renderTagGroups,
   resolveNote,
   resolveTag,
+  sanitizeText,
   searchNotes,
   tagGraph,
   taggedNoteUuids,
@@ -61,6 +64,11 @@ test("list hides trashed notes and non-note types", () => {
     ]);
     const notes = listNotes(db, { limit: 10 });
     expect(notes.map((note) => note.title)).toEqual(["Kept", "Open"]);
+    // search and resolution run on the same precomputed trash filter
+    expect(searchNotes(db, "bin", { limit: 10 })).toEqual([]);
+    expect(searchNotes(db, "stay", { limit: 10 }).map((hit) => hit.title)).toEqual(["Kept"]);
+    expect(() => resolveNote(db, "Gone")).toThrow(/no note matches/);
+    expect(resolveNote(db, "Kept").uuid).toBe("11111111-1111-1111-1111-111111111111");
     const table = renderTagGroups(tagGraph(db), notes);
     expect(table).toContain("(untagged) (2)");
     const lines = table.split("\n");
@@ -1000,6 +1008,221 @@ test("inventoryText renders a keyless note as masked prose — the only view the
     expect(text).toContain("and DONE=[redacted] mostly");
     expect(text).not.toContain("hunter2");
     expect(text).not.toContain("copy a value");
+  } finally {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("redactAssignments masks assignments whatever punctuation precedes the key", () => {
+  // the three shapes that used to print verbatim in show prose and snippets:
+  // parenthesized, quoted, and comment-prefixed
+  expect(redactAssignments("(API_KEY=hunter2)")).toBe("(API_KEY=[redacted]");
+  expect(redactAssignments('"TOKEN=abc123"')).toBe('"TOKEN=[redacted]');
+  expect(redactAssignments("#OLD_KEY=zzz")).toBe("#OLD_KEY=[redacted]");
+  // a quoted value is masked by its whole quoted span — quotes included — so
+  // a multi-word value never leaks the words after the first token
+  expect(redactAssignments('(API_KEY="secret value here")')).toBe("(API_KEY=[redacted])");
+  expect(redactAssignments("see KEY='a b c' tail")).toBe("see KEY=[redacted] tail");
+  // every assignment in a multiline body masks — line starts included
+  expect(redactAssignments("A=1\n(B=2)\n#C=3")).toBe("A=[redacted]\n(B=[redacted]\n#C=[redacted]");
+  // a key fused into a longer identifier run masks as the whole run — `BAR`
+  // inside `my_fooBAR` is never matched on its own (the parser keys the same
+  // full token), and with no value after the `=` nothing masks at all
+  expect(redactAssignments("my_fooBAR=x")).toBe("my_fooBAR=[redacted]");
+  expect(redactAssignments("my_fooBAR=")).toBe("my_fooBAR=");
+  expect(redactAssignments("ends with base64 cGFzc3dvcmQ=")).toBe("ends with base64 cGFzc3dvcmQ=");
+  // assignments fused together — a consuming anchor would swallow the
+  // closing quote and leave the second value print — both mask
+  expect(redactAssignments('OLD_TOKEN="abc"NEW_TOKEN="def"')).toBe(
+    'OLD_TOKEN=[redacted]NEW_TOKEN=[redacted]',
+  );
+});
+
+test("a search snippet masks assignments that punctuation or quotes precede", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sns-snippet-prefix-"));
+  const db = openDatabase(join(dir, "cache.db"), randomBytes(32).toString("hex"));
+  try {
+    upsertItems(db, [
+      {
+        uuid: "dddddddd-2222-2222-2222-222222222222",
+        content_type: "Note",
+        updated_at: 2_000,
+        deleted: 0,
+        title: "Masks",
+        content: JSON.stringify({
+          title: "Masks",
+          text: 'see (API_KEY=hunter2) here\n"#TOKEN=abc123" quoted\n#OLD_KEY=zzz tail\nends my_fooBAR=\n(TOKEN="hunter2\nsecond-line-hunter2") tail',
+        }),
+      },
+    ] satisfies ItemRow[]);
+    const byPunct = searchNotes(db, "hunter2", { limit: 10 });
+    expect(byPunct).toHaveLength(1);
+    expect(byPunct[0]!.snippet).toContain("(API_KEY=[redacted]");
+    expect(byPunct[0]!.snippet).not.toContain("hunter2");
+    const byQuoted = searchNotes(db, "abc123", { limit: 10 });
+    expect(byQuoted).toHaveLength(1);
+    expect(byQuoted[0]!.snippet).toContain('"#TOKEN=[redacted]');
+    expect(byQuoted[0]!.snippet).not.toContain("abc123");
+    const byComment = searchNotes(db, "zzz", { limit: 10 });
+    expect(byComment).toHaveLength(1);
+    expect(byComment[0]!.snippet).toContain("#OLD_KEY=[redacted]");
+    expect(byComment[0]!.snippet).not.toContain("zzz");
+    // the identifier-fused, valueless shape (`=` with nothing after it) is
+    // prose — it prints verbatim, base64 padding included
+    const byContinuation = searchNotes(db, "ends", { limit: 10 });
+    expect(byContinuation).toHaveLength(1);
+    expect(byContinuation[0]!.snippet).toContain("ends my_fooBAR=");
+    // a punctuation-prefixed quoted value spanning lines: the line-level mask
+    // catches the whole quoted span (continuation lines included), so a hit
+    // on the value's second line still shows nothing
+    const multiline = searchNotes(db, "second-line-hunter2", { limit: 10 });
+    expect(multiline).toHaveLength(1);
+    expect(multiline[0]!.snippet).toContain("TOKEN=[redacted]");
+    expect(multiline[0]!.snippet).not.toContain("second-line-hunter2");
+    expect(multiline[0]!.snippet).not.toContain("hunter2");
+  } finally {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("sanitizeText strips terminal escapes and keeps plain text, newlines, and tabs", () => {
+  expect(sanitizeText("plain text stays")).toBe("plain text stays");
+  expect(sanitizeText("a\nb\tc")).toBe("a\nb\tc");
+  // CSI beyond SGR: erase-screen, cursor-home, private modes
+  expect(sanitizeText("x\x1b[2J\x1b[Hy\x1b[?25lz")).toBe("xyz");
+  // OSC closed by BEL (window title) and by ST (an OSC 8 hyperlink pair)
+  expect(sanitizeText("a\x1b]0;window title\x07b")).toBe("ab");
+  expect(sanitizeText("a\x1b]8;;http://evil.test\x1b\\click\x1b]8;;\x1b\\b")).toBe("aclickb");
+  // an unterminated OSC has no honest end: the rest of the text goes with it
+  expect(sanitizeText("keep\x1b]0;swallow")).toBe("keep");
+  // DCS/APC/PM strings, lone ESC, DEL, and C1 bytes
+  expect(sanitizeText("a\x1bP$data\x1b\\b\x1b_appc\x07c")).toBe("abc");
+  expect(sanitizeText("d\x1be")).toBe("de");
+  expect(sanitizeText("a\u009b31mb")).toBe("a31mb");
+  expect(sanitizeText("a\u0085b\x7fc")).toBe("abc");
+});
+
+test("renderNoteInventory sanitizes note-supplied title, prose, and comments", () => {
+  const text = renderNoteInventory({
+    title: "staging\x1b]0;pwned\x07 api",
+    settings: new Map([["A", "1"]]),
+    comments: new Map([["A", "# host\x1b]8;;http://evil.test\x1b\\hint\x1b]8;;\x1b\\"]]),
+    prose: "red \x1b[31mprose\x1b[0m here\n\ttabbed line kept\n\x1b[?25l",
+    query: "staging",
+    terminal: false,
+  });
+  const lines = text.split("\n");
+  // the title renders clean, separator length and all
+  expect(lines[0]).toBe("staging api");
+  expect(lines[1]).toBe("───────────");
+  // prose keeps its newlines and tabs; only the escapes go
+  expect(lines[2]).toBe("red prose here");
+  expect(lines[3]).toBe("\ttabbed line kept");
+  expect(text).not.toContain("\x1b");
+  expect(text).not.toContain("\u0007");
+  expect(text).not.toContain("\u009b");
+  // the comment's hyperlink wrapper is gone, its text stays
+  expect(text).toContain("A=[redacted]  # hosthint");
+});
+
+test("a tag parent cycle renders instead of crashing sns list", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sns-cycle-"));
+  const db = openDatabase(join(dir, "cache.db"), randomBytes(32).toString("hex"));
+  const a = "aaaa0000-1111-1111-1111-111111111111";
+  const b = "aaaa0000-2222-2222-2222-222222222222";
+  const one = "aaaa0000-3333-3333-3333-333333333333";
+  const two = "aaaa0000-4444-4444-4444-444444444444";
+  try {
+    upsertItems(db, [
+      {
+        uuid: a,
+        content_type: "Tag",
+        updated_at: 2_000,
+        deleted: 0,
+        title: "cycle-a",
+        content: JSON.stringify({
+          title: "cycle-a",
+          references: [
+            { uuid: b, content_type: "Tag" },
+            { uuid: one, content_type: "Note" },
+          ],
+        }),
+      },
+      {
+        uuid: b,
+        content_type: "Tag",
+        updated_at: 1_000,
+        deleted: 0,
+        title: "cycle-b",
+        content: JSON.stringify({
+          title: "cycle-b",
+          references: [
+            { uuid: a, content_type: "Tag" },
+            { uuid: two, content_type: "Note" },
+          ],
+        }),
+      },
+      {
+        uuid: one,
+        content_type: "Note",
+        updated_at: 4_000,
+        deleted: 0,
+        title: "One",
+        content: JSON.stringify({ title: "One", text: "one", references: [{ uuid: a, content_type: "Tag" }] }),
+      },
+      {
+        uuid: two,
+        content_type: "Note",
+        updated_at: 3_000,
+        deleted: 0,
+        title: "Two",
+        content: JSON.stringify({ title: "Two", text: "two", references: [{ uuid: b, content_type: "Tag" }] }),
+      },
+    ]);
+    // the whole read path a cycle used to blow the stack on
+    const graph = tagGraph(db);
+    expect(listTags(db).map((tag) => tag.title)).toEqual(["cycle-a", "cycle-b"]);
+    const table = renderTagGroups(graph, listNotes(db, { limit: 10 }));
+    // the walk terminates; in a cycle each tag's subtree count is whatever its
+    // member's walk saw last — deterministic, and neither member is dropped
+    expect(table).toContain("cycle-a (1)");
+    expect(table).toContain("cycle-b (2)");
+    expect(table).toContain("One");
+    expect(table).toContain("Two");
+    // reachable notes still render exactly once each
+    expect(table.match(/aaaa0000-3333/g)?.length).toBe(1);
+    expect(table.match(/aaaa0000-4444/g)?.length).toBe(1);
+  } finally {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("noteBody of a key-bearing row allows only known metadata fields to print", () => {
+  const dir = mkdtempSync(join(tmpdir(), "sns-body-allow-"));
+  const db = openDatabase(join(dir, "cache.db"), randomBytes(32).toString("hex"));
+  try {
+    upsertItems(db, [
+      {
+        uuid: "bbbbbb00-0000-0000-0000-000000000001",
+        content_type: "SN|ItemsKey",
+        updated_at: 1_000,
+        deleted: 0,
+        title: null,
+        content: JSON.stringify({
+          itemsKey: "synthetic-key-not-real",
+          version: "004",
+          newerField: "value-not-for-stdout",
+        }),
+      },
+    ] satisfies ItemRow[]);
+    const { body } = noteBody(resolveNote(db, "bbbbbb00-0000", { all: true }));
+    // the byte-identical output for known fields, and a fail-closed unknown one
+    expect(body).toBe('{\n  "itemsKey": "[redacted]",\n  "version": "004",\n  "newerField": "[redacted]"\n}');
+    expect(body).not.toContain("synthetic-key-not-real");
+    expect(body).not.toContain("value-not-for-stdout");
   } finally {
     db.close();
     rmSync(dir, { recursive: true, force: true });

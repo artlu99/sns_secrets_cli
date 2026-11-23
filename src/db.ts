@@ -1,6 +1,11 @@
+/// The ambient declaration must ride along with this module: programs that
+/// pull db.ts in from another tsconfig root (the extension's typecheck walks
+/// entrypoints/lib and their imports only) never see sqlite.d.ts otherwise.
+/// <reference path="./sqlite.d.ts" />
 import Sqlite from "better-sqlite3-multiple-ciphers";
 import { existsSync, rmSync } from "node:fs";
 import { UserError } from "./errors.ts";
+import { isTrashed } from "./notes.ts";
 
 export type CacheDb = InstanceType<typeof Sqlite>;
 
@@ -38,7 +43,17 @@ CREATE TABLE IF NOT EXISTS sync_state (
  * recording it (pre-user_version) hit "duplicate column name" on reopen —
  * tolerated below, since it means the migration already ran.
  */
-const MIGRATIONS: string[] = ["ALTER TABLE sync_state ADD COLUMN stored_types TEXT"];
+const MIGRATIONS: string[] = [
+  "ALTER TABLE sync_state ADD COLUMN stored_types TEXT",
+  // Precomputed trash flag so the list/search paths stop JSON.parsing every
+  // body just to drop one row; upsertItems keeps it current from content.
+  "ALTER TABLE items ADD COLUMN trashed INTEGER NOT NULL DEFAULT 0",
+  // Backfill for rows written before the column. The CASE guard keeps a row
+  // whose content is not valid JSON from raising mid-migration, and
+  // json_type = 'true' matches isTrashed's strict `trashed === true` exactly
+  // (the JSON number 1 reads as 'integer', not trash).
+  "UPDATE items SET trashed = 1 WHERE CASE WHEN json_valid(content) THEN json_type(content, '$.trashed') END = 'true'",
+];
 
 /**
  * True only for "this file is not a database we can read" — a wrong key or a
@@ -134,18 +149,21 @@ export function writeSyncState(
 
 export function upsertItems(db: CacheDb, rows: ItemRow[]): void {
   const stmt = db.prepare(
-    `INSERT INTO items (uuid, content_type, updated_at, deleted, title, content)
-     VALUES (@uuid, @content_type, @updated_at, @deleted, @title, @content)
+    `INSERT INTO items (uuid, content_type, updated_at, deleted, title, content, trashed)
+     VALUES (@uuid, @content_type, @updated_at, @deleted, @title, @content, @trashed)
      ON CONFLICT(uuid) DO UPDATE SET
        content_type = excluded.content_type,
        updated_at = excluded.updated_at,
        deleted = excluded.deleted,
        title = excluded.title,
-       content = excluded.content
+       content = excluded.content,
+       trashed = excluded.trashed
      WHERE excluded.updated_at >= items.updated_at`,
   );
   const write = db.transaction((items: ItemRow[]) => {
-    for (const item of items) stmt.run(item);
+    // trashed is derived from content at the one write chokepoint, so every
+    // synced row carries a queryable flag and the readers never re-parse
+    for (const item of items) stmt.run({ ...item, trashed: isTrashed(item.content) ? 1 : 0 });
   });
   write(rows);
 }

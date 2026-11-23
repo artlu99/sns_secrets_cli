@@ -1,4 +1,16 @@
-import { chmodSync, existsSync, readFileSync, rmSync } from "node:fs";
+import {
+  chmodSync,
+  closeSync,
+  constants,
+  existsSync,
+  fchmodSync,
+  fstatSync,
+  lstatSync,
+  openSync,
+  readFileSync,
+  rmSync,
+  statSync,
+} from "node:fs";
 import { parse, set } from "@dotenvx/dotenvx";
 import { UserError } from "./errors.ts";
 import { SESSION_VALUE_KEYS, assertSessionKeyNames, type SessionValueKey } from "./env.ts";
@@ -89,11 +101,74 @@ function sessionHasPublicKey(): boolean {
   }
 }
 
+/**
+ * .env.session is 0600 from the instant it exists. Pre-create the file
+ * O_EXCL|O_NOFOLLOW at 0600 when absent (an umask-proof fchmod, an fstat
+ * assertion) and tighten an existing file before any write — repairing a
+ * mode a crashed save may have left wide. dotenvx replaces the file through
+ * write-file-atomic, whose temp copies the destination's existing mode
+ * (verified in node_modules: fsx.js -> writeFileAtomic.sync stats the target
+ * and reuses its mode), so every content-bearing rename lands 0600. The file
+ * is never wide with the refresh token inside, even mid-save or mid-crash.
+ * Runs after the custody decisions above — they must still see whether the
+ * file existed before this save.
+ */
+function ensureSessionFilePrivate(): void {
+  const path = sessionPath();
+  if (lstatSync(path, { throwIfNoEntry: false })?.isSymbolicLink()) {
+    throw new UserError(`${path} is a symlink — refusing to write through it`);
+  }
+  if (existsSync(path)) {
+    chmodSync(path, 0o600);
+    return;
+  }
+  let fd: number;
+  try {
+    fd = openSync(path, constants.O_WRONLY | constants.O_CREAT | constants.O_EXCL | (constants.O_NOFOLLOW ?? 0), 0o600);
+  } catch (error) {
+    if ((error as NodeJS.ErrnoException)?.code === "EEXIST") {
+      // A concurrent save created it first; tighten and move on.
+      chmodSync(path, 0o600);
+      return;
+    }
+    throw error;
+  }
+  try {
+    fchmodSync(fd, 0o600);
+    const stat = fstatSync(fd);
+    if ((stat.mode & 0o777) !== 0o600) {
+      throw new UserError(
+        `${path} is not 0600 after create (mode 0${(stat.mode & 0o777).toString(8)}) — removing it`,
+      );
+    }
+  } catch (error) {
+    try {
+      rmSync(path, { force: true });
+    } catch {
+      // at worst an empty 0600 file owned by us; the next save retries
+    }
+    throw error;
+  } finally {
+    closeSync(fd);
+  }
+}
+
 export async function saveSession(secrets: SessionSecrets): Promise<{ keychain: boolean }> {
   if (!/^[0-9a-fA-F]{64}$/.test(secrets.dbKey)) {
     throw new UserError("refusing to store a database key that is not 64 hex characters");
   }
   ensureConfigDir();
+  // A crashed save can leave the pre-created empty target behind (created
+  // before dotenvx's first rename). It carries nothing, and its existence
+  // would flip the custody decisions below into materializing .env.keys for
+  // a bootstrap dotenvx then refuses to run. Remove it so this save takes
+  // the fresh-login path; unreadable garbage stays for the reader's clear
+  // error instead.
+  try {
+    if (existsSync(sessionPath()) && statSync(sessionPath()).size === 0) rmSync(sessionPath(), { force: true });
+  } catch {
+    // keep going; the write below surfaces real failures
+  }
   const keychainKey = await keychainGet();
   const inject = keychainKey !== null && !existsSync(keysPath()) && sessionHasPublicKey();
   const previousKey = process.env.DOTENV_PRIVATE_KEY_SESSION;
@@ -111,6 +186,7 @@ export async function saveSession(secrets: SessionSecrets): Promise<{ keychain: 
   }
   // dotenvx prompts for private-key custody on a TTY unless CI is set.
   // File custody bootstraps the keypair; the keychain move happens after.
+  ensureSessionFilePrivate();
   const previousCi = process.env.CI;
   process.env.CI = "true";
   if (inject) process.env.DOTENV_PRIVATE_KEY_SESSION = keychainKey;
@@ -128,6 +204,8 @@ export async function saveSession(secrets: SessionSecrets): Promise<{ keychain: 
       else process.env.DOTENV_PRIVATE_KEY_SESSION = previousKey;
     }
   }
+  // Belt and suspenders: every content-bearing write above landed through a
+  // 0600 temp, so this only repairs a mode if dotenvx's writer changed.
   chmodSync(sessionPath(), 0o600);
   const keychain = await protectPrivateKey();
   return { keychain };

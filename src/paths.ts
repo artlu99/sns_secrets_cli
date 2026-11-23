@@ -16,6 +16,7 @@ import {
 } from "node:fs";
 import { homedir } from "node:os";
 import { join } from "node:path";
+import { assertApiUrl, assertPlainEnvValue } from "./env.ts";
 
 export const DEFAULT_API_URL = "https://api.standardnotes.com";
 
@@ -101,7 +102,12 @@ export function readPlainConfig(): PlainConfig {
   // set in the environment must win over that placeholder.
   const email = parsed.SN_EMAIL || process.env.SN_EMAIL || "";
   const apiUrl = parsed.SN_API_URL || process.env.SN_API_URL || DEFAULT_API_URL;
-  return { email, apiUrl: apiUrl.replace(/\/+$/, "") };
+  const normalized = apiUrl.replace(/\/+$/, "");
+  // Config load is the gate every network command passes through: no
+  // plaintext HTTP to a remote host. (Callers that must survive a broken
+  // config — logout — catch this and fall back to the default host.)
+  assertApiUrl(normalized);
+  return { email, apiUrl: normalized };
 }
 
 /** The keys writePlainConfig owns; anything else in the file survives rewrites. */
@@ -129,6 +135,13 @@ export function writePlainConfig(patch: Partial<PlainConfig>): void {
   const current = readPlainConfig();
   const email = patch.email ?? current.email;
   const apiUrl = patch.apiUrl ?? current.apiUrl;
+  // The file is written unquoted; a control character here would forge lines
+  // in the operator's .env. The URL gate applies at write time too, so a
+  // plaintext remote never lands in the file in the first place (the
+  // SNS_ALLOW_INSECURE_API escape hatch still applies, via assertApiUrl).
+  assertPlainEnvValue("SN_EMAIL", email);
+  assertPlainEnvValue("SN_API_URL", apiUrl);
+  assertApiUrl(apiUrl);
   // Operators keep hand-added lines: every rewrite carries them through
   // instead of truncating the file to the two keys this program owns.
   const preserved: string[] = [];

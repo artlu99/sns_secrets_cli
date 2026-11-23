@@ -42,6 +42,16 @@ export const SUBCOMMANDS = [
 /** Upper bound on note candidates: shells get sluggish with huge COMPREPLY lists. */
 const MAX_CANDIDATES = 100;
 
+/**
+ * Candidates are printed one per line and rendered by readline/zle, so any
+ * control character (C0, DEL, C1) would corrupt the line protocol or smuggle
+ * terminal escapes into the completion display — every CSI/OSC sequence needs
+ * ESC or the lone-C1 CSI introducer, both in this class. Such titles/keys are
+ * simply not offered (the note's uuid prefix still is); they are never
+ * rewritten, so an offered candidate always resolves exactly as typed.
+ */
+const CONTROL_CHARS = /[\u0000-\u001f\u007f-\u009f]/;
+
 type Stage = {
   kind: "subcommands" | "shells" | "noteIds" | "keys" | "logoutFlag" | "none";
   partial: string;
@@ -156,7 +166,7 @@ function noteIdCandidates(db: CacheDb | null): string[] {
   const seen = new Set<string>();
   for (const row of rows) {
     const title = (row.title ?? "").trim();
-    if (title !== "" && !seen.has(title) && resolves(title)) {
+    if (title !== "" && !CONTROL_CHARS.test(title) && !seen.has(title) && resolves(title)) {
       seen.add(title);
       out.push(title);
     }
@@ -174,7 +184,7 @@ function keyCandidates(db: CacheDb | null, noteQuery: string): string[] {
   if (!db || noteQuery === "") return [];
   try {
     const row = resolveNote(db, noteQuery, { all: false });
-    return [...noteSettings(row).keys()];
+    return [...noteSettings(row).keys()].filter((key) => !CONTROL_CHARS.test(key));
   } catch {
     return [];
   }

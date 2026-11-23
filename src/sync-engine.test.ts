@@ -23,18 +23,22 @@ async function fixture(): Promise<{
   itemsKey: string;
   items: EncryptedItem[];
   noteId: string;
+  trashedId: string;
   tagId: string;
 }> {
   const master = hex();
   const itemsKey = hex();
   const itemsKeyId = crypto.randomUUID();
   const noteId = crypto.randomUUID();
+  const trashedId = crypto.randomUUID();
   const tagId = crypto.randomUUID();
   const wrap = hex();
   const noteKey = hex();
+  const trashedKey = hex();
   const tagKey = hex();
   const itemsAad = { u: itemsKeyId, v: "004" };
   const noteAad = { u: noteId, v: "004" };
+  const trashedAad = { u: trashedId, v: "004" };
   const tagAad = { u: tagId, v: "004" };
   const items: EncryptedItem[] = [
     {
@@ -51,6 +55,18 @@ async function fixture(): Promise<{
       updated_at_timestamp: 2_000,
       enc_item_key: await sealed(noteKey, itemsKey, noteAad),
       content: await sealed(JSON.stringify({ title: "Pins", text: "door code 2468" }), noteKey, noteAad),
+    },
+    {
+      uuid: trashedId,
+      content_type: "Note",
+      items_key_id: itemsKeyId,
+      updated_at_timestamp: 2_500,
+      enc_item_key: await sealed(trashedKey, itemsKey, trashedAad),
+      content: await sealed(
+        JSON.stringify({ title: "Burner", text: "burner trashed elsewhere", trashed: true }),
+        trashedKey,
+        trashedAad,
+      ),
     },
     {
       uuid: tagId,
@@ -77,7 +93,7 @@ async function fixture(): Promise<{
       content: "not-a-note",
     },
   ];
-  return { master, itemsKey, items, noteId, tagId };
+  return { master, itemsKey, items, noteId, trashedId, tagId };
 }
 
 test("server timestamps in microseconds become unix milliseconds", () => {
@@ -117,14 +133,18 @@ test("sync writes decrypted notes, then an incremental pull is empty", async () 
         return pages[calls - 1] ?? pages[1]!;
       },
     });
-    expect(first.upserted).toBe(3);
+    expect(first.upserted).toBe(4);
     expect(first.conflicts).toBe(1);
-    expect(countItems(db)).toBe(3);
+    expect(countItems(db)).toBe(4);
     const note = resolveNote(db, "Pins");
     expect(note.uuid).toBe(noteId);
     expect(noteBody(note).body).toBe("door code 2468");
     expect(listNotes(db, { limit: 10 }).map((row) => row.title)).toEqual(["Pins"]);
     expect(searchNotes(db, "2468", { limit: 10 })[0]?.snippet).toContain("2468");
+    // the trashed note was stored but stays out of every read path
+    expect(listNotes(db, { limit: 10, all: true }).map((row) => row.title)).toEqual(["Pins", "SN|ItemsKey"]);
+    expect(searchNotes(db, "burner", { limit: 10 })).toEqual([]);
+    expect(() => resolveNote(db, "Burner")).toThrow(/no note matches/);
 
     const tags = listTags(db);
     expect(tags.map((tag) => [tag.title, tag.parent, tag.notes])).toEqual([["prod", null, 1]]);

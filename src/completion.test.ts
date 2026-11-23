@@ -163,3 +163,39 @@ test("flags do not shift the note argument's position", () => {
     rmSync(dir, { recursive: true, force: true });
   }
 });
+
+test("control-character titles are never offered (escape/protocol safety), uuids still are", () => {
+  const esc = "\u001b[31mesc\u001b[0m";
+  const { dir, db } = seededDb([
+    {
+      uuid: "99999999-8888-7777-6666-555555555555",
+      content_type: "Note",
+      updated_at: 3,
+      deleted: 0,
+      title: esc,
+      content: JSON.stringify({ title: esc, text: "prose" }),
+    },
+    {
+      uuid: "cccccccc-dddd-eeee-ffff-000000000000",
+      content_type: "Note",
+      updated_at: 4,
+      deleted: 0,
+      title: "multi\nline",
+      content: JSON.stringify({ title: "multi\nline", text: "prose" }),
+    },
+  ]);
+  try {
+    const candidates = completeArgv(["sns", "show", ""], 2, db);
+    for (const candidate of candidates) {
+      expect(candidate).not.toMatch(/[\u0000-\u001f\u007f-\u009f]/);
+    }
+    expect(candidates).not.toContain(esc);
+    expect(candidates).not.toContain("multi");
+    expect(candidates).toContain("Staging"); // benign titles unchanged
+    expect(candidates).toContain("99999999"); // poisoned notes stay reachable by uuid
+    expect(candidates).toContain("cccccccc");
+  } finally {
+    db.close();
+    rmSync(dir, { recursive: true, force: true });
+  }
+});

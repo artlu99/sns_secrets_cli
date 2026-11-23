@@ -4,6 +4,7 @@ import { existsSync } from "node:fs";
 import { UserError } from "../errors.ts";
 import { createApi, randomDbKey } from "../sn-api.ts";
 import { readPlainConfig, sessionPath, writePlainConfig } from "../paths.ts";
+import { sanitizeText } from "../notes.ts";
 import { loadSession, saveSession, type SessionSecrets } from "../session-file.ts";
 import { clearSession } from "./logout.ts";
 import { promptConfirm, promptLine, promptSecret } from "./prompt.ts";
@@ -37,13 +38,15 @@ export async function loginCommand(): Promise<void> {
     } catch (error) {
       // `sns login` is the recovery path for a broken session — it must not
       // fail on the very state it exists to fix.
-      const reason = error instanceof Error ? error.message : "unreadable session file";
+      const reason = sanitizeText(error instanceof Error ? error.message : "unreadable session file");
       console.error(pc.yellow(`the existing session is unreadable and will be replaced (${reason})`));
     }
   }
   if (existing?.accountEmail && existing.accountEmail !== email) {
+    // accountEmail came from server data via the session file — display it
+    // through the sanitizer like every other untrusted string.
     const switchAccount = await promptConfirm(
-      `session belongs to ${existing.accountEmail} — logout and continue as ${email}?`,
+      `session belongs to ${sanitizeText(existing.accountEmail)} — logout and continue as ${email}?`,
       false,
     );
     if (!switchAccount) {
