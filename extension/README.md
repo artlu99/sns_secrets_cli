@@ -33,16 +33,20 @@ print **Finished**, then Reload.
   per-key inventory on the right with show/hide and copy. Prose is rendered
   with assignment-shaped fragments redacted, exactly like `sns show`.
 - **Clipboard auto-clear**: every copy schedules an overwrite after 30
-  seconds. The timer lives in an offscreen document — the only context that
+  seconds — a best-effort promise: a browser can refuse both write paths, and
+  the attempt's outcome is recorded in session storage rather than guaranteed.
+  The timer lives in an offscreen document — the only context that
   can host it (popups die on focus loss; the MV3 service worker sleeps; and
   offscreen documents get no extension APIs beyond runtime messaging, so the
   schedule travels as a message or baked into the document's creation URL,
-  with the arm acknowledged). Copying again restarts the 30 s; the offscreen
+  with the arm acknowledged; if the schedule cannot be confirmed, the
+  copying surface falls back to a best-effort in-page timer and says so in
+  the UI). Copying again restarts the 30 s; the offscreen
   page exits once the clear fires. Browsers cannot *clear* the clipboard,
   only overwrite it — and some refuse an empty write entirely, so the
-  fallback overwrites with a single space: pasting after the clear yields a
-  space, never the secret. `bun scripts/e2e-clipboard.ts` verifies the whole
-  chain in a headless Chromium.
+  fallback overwrites with a single space: when the write lands, pasting
+  after the clear yields a space, never the secret. `bun
+  scripts/e2e-clipboard.ts` verifies the whole chain in a headless Chromium.
 
 ## Security model
 
@@ -55,11 +59,26 @@ print **Finished**, then Reload.
   network traffic is to the Standard Notes API (declared:
   `api.standardnotes.com`; a self-hosted server URL is requested as an
   optional permission at first login, on the click's user gesture).
-- **Auto-lock**: after 5 minutes without input (pointer, keys, wheel, scroll)
-  — or after 2 minutes with the dashboard tab hidden — both surfaces re-gate
-  to the login form and the session is wiped from session storage, exactly
-  like the lock button. The durations are constants at the top of
-  `components/auto-lock.ts`.
+- **Auto-lock**: owned by the MV3 service worker, not the surfaces — the lock
+  clock is one `lockState` record in `chrome.storage.session` plus a one-shot
+  `chrome.alarms` timer, so a closed popup, a closed tab, or the worker being
+  killed does not disarm it (a closed popup used to leave the vault unlocked
+  until browser exit). Surfaces report input activity (pointer moves, clicks,
+  keys, wheel — throttled to one report per 10 s) and hide/show transitions by
+  writing that record, and every write re-arms the alarm. It fires 5 minutes
+  after the last activity — or 2 minutes after the dashboard tab (the only
+  surface that outlives hiding) was hidden; only the dashboard's visible
+  report cancels the walk-away clock, since popup activity cannot vouch for a
+  tab it cannot see (active popup use alongside a hidden dashboard still
+  walks away at 2 minutes — deterministic beats a budget that silently
+  degrades). A dead service worker cannot hide from the surfaces either:
+  they re-check the deadline every 30 s and lock directly when it has
+  passed. When the alarm fires — or the lock button in
+  any surface is pressed — the master key, tokens, and decrypted cache are
+  wiped from session storage and `locked` flips true; every open surface
+  re-gates to the login form immediately via a storage watcher, and in-flight
+  syncs and token refreshes abort on an epoch check rather than writing back
+  after the wipe. Durations are constants at the top of `lib/lock-schedule.ts`.
 - MV3 CSP: no remote code; `'wasm-unsafe-eval'` is present solely so
   libsodium's WASM can run.
 
@@ -69,7 +88,7 @@ print **Finished**, then Reload.
 bun run dev      # wxt dev — loads a dev build into a Chromium it launches
 bun run build    # production build to .output/chrome-mv3
 bun run typecheck
-bun test         # lib tests (PKCE/004 interop with the CLI, sync, tags)
+bun test         # lib tests (PKCE/004 interop with the CLI, sync, tags, lock scheduling)
 ```
 
 Icons are PNG (16/32/48/128), generated from the SVG in

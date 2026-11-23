@@ -117,3 +117,14 @@ export function cookiePair(setCookies: readonly string[], prefix: string): strin
   }
   return "";
 }
+
+export function asRecord(value: unknown): Record<string, unknown> | null {
+  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
+  return value as Record<string, unknown>;
+}
+
+/** Standard Notes wraps payloads in `data`; fall back to the root itself. */
+export function unwrap(body: unknown): Record<string, unknown> {
+  const root = asRecord(body) ?? {};
+  return asRecord(root.data) ?? root;
+}

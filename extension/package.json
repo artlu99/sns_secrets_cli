@@ -1,6 +1,6 @@
 {
   "name": "sns-vault-extension",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Chrome MV3 vault UI over the same crypto and note conventions as the sns CLI",
   "private": true,
   "type": "module",

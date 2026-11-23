@@ -28,7 +28,11 @@ export type VaultSession = {
   apiUrl: string;
 };
 
-const SESSION_KEY = "vaultSession";
+/** storage.session keys for the vault session and the decrypted-item cache.
+ * Exported so the lock owner (lib/lock-state.ts, used by the service worker)
+ * can wipe both without importing the crypto chain. */
+export const SESSION_KEY = "vaultSession";
+export const CACHE_KEY = "vaultCache";
 
 export async function loadSession(): Promise<VaultSession | null> {
   const got = await browser.storage.session.get(SESSION_KEY);

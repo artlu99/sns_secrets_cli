@@ -16,6 +16,9 @@ import {
 import { useAutoLock } from "../../components/auto-lock.ts";
 import { MfaForm, UnlockForm } from "../../components/UnlockForm.tsx";
 import { copySecret } from "../../lib/clipboard.ts";
+import { loadCacheOverflow } from "../../lib/cache.ts";
+import { getLockState, performLock } from "../../lib/lock-state.ts";
+import { ensureOriginRules } from "../../lib/origin.ts";
 import { loadSession, loadSettings, type VaultSession } from "../../lib/session.ts";
 import { lockVault, syncVault, unlockVault } from "../../lib/unlock.ts";
 import { buildVault, type NoteSummary, type VaultView } from "../../lib/vault.ts";
@@ -49,9 +52,15 @@ export default function App() {
   const [syncedAt, setSyncedAt] = useState<number | null>(null);
   const [syncing, setSyncing] = useState(false);
   const [autoLocked, setAutoLocked] = useState(false);
+  const [cacheWarning, setCacheWarning] = useState(false);
   const copyTimer = useRef<number | null>(null);
   const mfaResolver = useRef<((code: string) => void) | null>(null);
-  useAutoLock(phase === "ready", () => void lock("auto"));
+  // When we call lockVault() ourselves, the resulting lockState write must
+  // not come back through the watcher as an "auto" lock.
+  const selfLockAt = useRef(0);
+  // The dashboard is the only surface that survives hiding, so it alone
+  // reports hide/show to the lock owner (the walk-away clock).
+  useAutoLock(phase === "ready", onLockEvent, { watchVisibility: true });
 
   useEffect(() => {
     void boot();
@@ -60,21 +69,52 @@ export default function App() {
     };
   }, []);
 
+  function onLockEvent(reason: "manual" | "auto"): void {
+    if (Date.now() - selfLockAt.current < 1500) return; // our own lock() write
+    void lock(reason === "auto" ? "auto" : undefined);
+  }
+
   async function boot(): Promise<void> {
     // Same contract as the popup's boot: a failure lands on the login form.
     try {
-      const [settings, existing] = await Promise.all([loadSettings(), loadSession()]);
+      // Wake the worker and make sure the origin rules are in before any
+      // POST leaves this page — a fresh install's first login otherwise
+      // races the dynamic-rule install and the hosted API 500s.
+      await ensureOriginRules();
+      const [settings, existing, lockState, overflow] = await Promise.all([
+        loadSettings(),
+        loadSession(),
+        getLockState(),
+        loadCacheOverflow(),
+      ]);
       setEmail(settings.email);
       setApiUrl(settings.apiUrl);
+      setCacheWarning(overflow);
       // The popup hands over "#note=<uuid>" when it opens a note here.
       const wanted = /^#note=([0-9a-f-]+)$/.exec(location.hash)?.[1];
       if (wanted) setNoteUuid(wanted);
-      if (existing) {
-        setSession(existing);
-        await refresh(existing);
-      } else {
+      // The lock state is the truth about the vault, not the presence of a
+      // session record: one stranded by a crash mid-lock gets wiped here
+      // instead of auto-unlocking.
+      if (!existing || lockState.locked) {
+        if (existing) {
+          // Our own wipe: the always-on lock watcher must not read it back
+          // as an "auto" lock (it would fake the inactivity notice).
+          selfLockAt.current = Date.now();
+          await performLock();
+        }
         setPhase("locked");
+        return;
       }
+      // The alarm can fire while the awaits above ran: re-check before any
+      // decrypted state commits, or a wiped vault would render from memory
+      // with no later lockState write ever re-gating it.
+      if ((await getLockState()).locked) {
+        setPhase("locked");
+        return;
+      }
+      setSession(existing);
+      await refresh(existing);
     } catch (caught) {
       setError(messageOf(caught));
       setPhase("locked");
@@ -86,9 +126,10 @@ export default function App() {
     setStatus("Syncing…");
     setError("");
     try {
-      const { items, report } = await syncVault(current);
+      const { items, report, cacheSaved } = await syncVault(current);
       setView(buildVault(items));
       setSyncedAt(report.pages > 0 ? Date.now() : null);
+      setCacheWarning(cacheSaved === false);
       setPhase("ready");
     } catch (caught) {
       setError(messageOf(caught));
@@ -148,10 +189,14 @@ export default function App() {
   }
 
   async function lock(reason?: "auto"): Promise<void> {
+    selfLockAt.current = Date.now();
     await lockVault();
     setAutoLocked(reason === "auto");
     setSession(null);
     setView(null);
+    // Revealed values and the filter must not survive a re-gate.
+    setRevealed(new Set());
+    setQuery("");
     setPhase("locked");
   }
 
@@ -213,10 +258,14 @@ export default function App() {
           onClick={() => {
             setSyncing(true);
             void syncVault(session)
-              .then(({ items, report }) => {
+              .then(({ items, report, cacheSaved }) => {
                 setView(buildVault(items));
                 setSyncedAt(report.pages > 0 ? Date.now() : null);
+                setCacheWarning(cacheSaved === false);
+                setError("");
               })
+              // A swallowed failure here read as "synced" — surface it.
+              .catch((caught) => setError(messageOf(caught)))
               .finally(() => setSyncing(false));
           }}
         >
@@ -392,6 +441,10 @@ export default function App() {
         </section>
       </div>
       {error !== "" ? <p className="error" role="alert">{error}</p> : null}
+      {cacheWarning ? (
+        <p className="error" role="alert">Vault too large for session storage — the decrypted cache was not
+          saved; the next open re-syncs from scratch.</p>
+      ) : null}
     </div>
   );
 }

@@ -3,12 +3,15 @@
  * refresh-once retry. node:crypto is replaced with WebCrypto. PKCE keeps the
  * CLI's exact quirks — the verifier is padded base64 with +/ swapped, and the
  * challenge is base64url of the digest's *hex string* (Standard Notes hashes
- * that string) — both pinned against the CLI implementation by a test.
+ * that string) — both pinned against the CLI implementation by a test. The
+ * refresh POST itself lives in lib/refresh-flight.ts, shared with the
+ * service worker's cross-context refresh coordinator.
  */
 import { UserError } from "../../src/errors.ts";
 import { deriveRootKey, type KdfParams } from "../../src/sn-crypto/kdf.ts";
-import { API_VERSION, ApiError, CLIENT_HEADERS, cookiePair, sendJson, type HttpOptions } from "./http.ts";
+import { API_VERSION, ApiError, CLIENT_HEADERS, asRecord, sendJson, unwrap, type HttpOptions } from "./http.ts";
 import { bytesToBase64, stripBase64Pad, toBase64Url, toHex, utf8ToBytes } from "./b64.ts";
+import { createRefreshClient, parseSessionBody } from "./refresh-flight.ts";
 import type { SessionSecrets } from "./session.ts";
 
 export type SyncPage = {
@@ -30,18 +33,6 @@ export async function createPkce(): Promise<{ verifier: string; challenge: strin
   crypto.getRandomValues(raw);
   const verifier = toBase64Url(bytesToBase64(raw));
   return { verifier, challenge: await pkceChallenge(verifier) };
-}
-
-type JsonRecord = Record<string, unknown>;
-
-function asRecord(value: unknown): JsonRecord | null {
-  if (!value || typeof value !== "object" || Array.isArray(value)) return null;
-  return value as JsonRecord;
-}
-
-function unwrap(body: unknown): JsonRecord {
-  const root = asRecord(body) ?? {};
-  return asRecord(root.data) ?? root;
 }
 
 export type MfaChallenge = { mfaKey: string; message: string };
@@ -78,31 +69,6 @@ function numberOrUndefined(value: unknown): number | undefined {
   return undefined;
 }
 
-function expirationMs(value: unknown): number {
-  const n = typeof value === "number" ? value : typeof value === "string" ? Number(value) : 0;
-  if (!Number.isFinite(n) || n <= 0) return 0;
-  return n < 1e12 ? n * 1000 : n;
-}
-
-export function parseSessionBody(body: unknown, setCookies: readonly string[]): SessionSecrets {
-  const data = unwrap(body);
-  const session = asRecord(data.session) ?? asRecord(data.Session) ?? {};
-  const accessToken = String(session.access_token ?? "");
-  const refreshToken = String(session.refresh_token ?? "");
-  if (accessToken === "" || refreshToken === "") {
-    throw new UserError("login response did not include session tokens");
-  }
-  return {
-    accountEmail: "",
-    accessToken,
-    refreshToken,
-    accessExpirationMs: expirationMs(session.access_expiration ?? session.access_token_expiration),
-    refreshExpirationMs: expirationMs(session.refresh_expiration ?? session.refresh_token_expiration),
-    accessCookie: cookiePair(setCookies, "access_token"),
-    refreshCookie: cookiePair(setCookies, "refresh_token"),
-  };
-}
-
 export function parseSyncPage(body: unknown): SyncPage {
   const data = unwrap(body);
   const items = Array.isArray(data.retrieved_items) ? (data.retrieved_items as import("./crypto.ts").EncryptedItem[]) : [];
@@ -127,6 +93,10 @@ export type ApiClient = {
 export function createApi(apiUrl: string, fetchImpl?: import("./http.ts").FetchLike): ApiClient {
   const base = apiUrl.replace(/\/+$/, "");
   const http = { fetch: fetchImpl };
+  // The refresh endpoint lives in lib/refresh-flight.ts so the service
+  // worker's single-flight coordinator runs the exact same POST without
+  // importing this module's crypto chain.
+  const refresher = createRefreshClient(apiUrl, fetchImpl);
 
   async function post(path: string, body: unknown, headers: Record<string, string>, options?: HttpOptions) {
     return sendJson(
@@ -213,14 +183,7 @@ export function createApi(apiUrl: string, fetchImpl?: import("./http.ts").FetchL
     },
 
     async refresh(secrets) {
-      const headers: Record<string, string> = { Authorization: `Bearer ${secrets.refreshToken}` };
-      if (secrets.refreshCookie) headers.Cookie = secrets.refreshCookie;
-      const response = await post("/v1/sessions/refresh", { api: API_VERSION }, headers);
-      const next = parseSessionBody(response.body, response.setCookies);
-      if (!next.accountEmail && secrets.accountEmail) next.accountEmail = secrets.accountEmail;
-      if (!next.accessCookie && secrets.accessCookie) next.accessCookie = secrets.accessCookie;
-      if (!next.refreshCookie && secrets.refreshCookie) next.refreshCookie = secrets.refreshCookie;
-      return next;
+      return refresher.refresh(secrets);
     },
 
     async logout(secrets) {
@@ -254,26 +217,36 @@ export function createApi(apiUrl: string, fetchImpl?: import("./http.ts").FetchL
 /**
  * Run one authenticated call. Refreshes an expired access token first, and
  * on 401/498 refreshes and retries the call exactly once.
+ *
+ * With `sharedRefresh` (the extension: refreshes route through the service
+ * worker's single-flight coordinator, lib/refresh-flight.ts), the worker
+ * refreshes AND persists behind the epoch guard — `save` is not called, so
+ * an in-flight renewal can never write tokens a concurrent lock just wiped.
+ * Without one, renewal is the direct refresh+save below.
  */
 export async function withAccess<T>(
   secrets: SessionSecrets,
   save: (next: SessionSecrets) => Promise<unknown>,
   api: ApiClient,
   run: (current: SessionSecrets) => Promise<T>,
+  sharedRefresh?: (secrets: SessionSecrets) => Promise<SessionSecrets>,
 ): Promise<T> {
+  const renew = sharedRefresh ?? (async (s: SessionSecrets) => {
+    const next = await api.refresh(s);
+    await save(next);
+    return next;
+  });
   let current = secrets;
   const expiring = current.accessExpirationMs > 0 && current.accessExpirationMs <= Date.now() + 30_000;
   if (current.accessToken === "" || expiring) {
-    current = await api.refresh(current);
-    await save(current);
+    current = await renew(current);
   }
   try {
     return await run(current);
   } catch (error) {
     if (!isAuthFailure(error)) throw error;
     try {
-      current = await api.refresh(current);
-      await save(current);
+      current = await renew(current);
     } catch {
       throw new UserError("session expired — sign in again");
     }
