@@ -1,6 +1,6 @@
 {
   "name": "sn-secrets-cli",
-  "version": "0.4.0",
+  "version": "0.5.0",
   "description": "Secure read-only Standard Notes companion — TypeScript CLI (tip of spear), Chrome extension, Rust portable port",
   "module": "src/index.ts",
   "type": "module",
