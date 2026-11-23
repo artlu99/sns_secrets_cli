@@ -30,7 +30,7 @@ A note with no settings is still a note — the CLI can copy its whole body; the
 Shared invariants across CLI and extension:
 
 - **Values never print.** Inventories show keys (and redacted prose); only `copy` / a click puts a value on the clipboard, one key at a time.
-- **Clipboard clears in ~30 seconds.** The terminal uses [OSC 52](https://invisible-island.net/xterm/ctlseqs/ctlseqs.html) (with a platform-tool fallback); the extension overwrites via an offscreen document (space if the browser refuses empty).
+- **Clipboard clears in ~30 seconds, best-effort.** The terminal uses [OSC 52](https://invisible-island.net/xterm/ctlseqs/ctlseqs.html) for the copy (with a platform-tool fallback) and writes an OSC 52 clear 30 s later — honored only by terminals that implement OSC 52, and re-fired by the next command if the clear process died; the extension overwrites via an offscreen document (space if the browser refuses empty — browsers cannot clear a clipboard, only overwrite it).
 - **Password is ephemeral.** Prompted without echo, used to derive keys, then dropped — never written to a file, env var, argv, or log.
 - **No page injection.** The extension has no content scripts; its only network traffic is the Standard Notes API.
 - **Crypto stays local.** Argon2id + protocol 004 (XChaCha20-Poly1305) run in-process (CLI) or as WASM in the extension. The crypto core is shared, not forked — parity is tested both ways.
@@ -43,17 +43,31 @@ Designed to move with you without dragging secrets into the wrong place:
 
 - **SSH-first CLI.** `sns copy` sends a value to *your local* clipboard over OSC 52, so a remote shell can paste into a local password field. The terminal prints a byte count, never the secret.
 - **Offline after sync (CLI).** `list` / `search` / `show` / `copy` / browse read the encrypted local cache; they do not need the network or a live access token.
-- **Nothing secret on disk (extension).** Master key, tokens, and the decrypted vault live in `chrome.storage.session` only — wiped when the browser exits. Auto-lock after 5 minutes idle (or 2 minutes with the dashboard tab hidden).
+- **Nothing secret on disk (extension).** Master key, tokens, and the decrypted vault live in `chrome.storage.session` only — wiped when the browser exits. Auto-lock after 5 minutes idle (or 2 minutes with the dashboard tab hidden), enforced by the service worker so closing the popup cannot disarm it.
 - **Same account, same rules.** Tag nesting, key parsing, and redaction match on both surfaces so a note that looks safe in the terminal looks safe in the popup.
-- **Small config surface (CLI).** Everything under `~/.config/sn_secrets_cli/` (or `SNS_CONFIG_DIR`). Plain `.env` is non-secret (`SN_EMAIL`, `SN_API_URL`); session material is dotenvx-encrypted. Prefer an OS keychain for the dotenvx private key when a secret service is available.
+- **Small config surface (CLI).** Everything under `~/.config/sn_secrets_cli/` (or `SNS_CONFIG_DIR`). Plain `.env` is non-secret (`SN_EMAIL`, `SN_API_URL`); session material is encrypted at rest — dotenvx under the TypeScript CLI, the Rust binary's own `enc1:` format under the Rust CLI (the two session formats are not interchangeable; switching binaries means re-login). Prefer an OS keychain for the session private key when a secret service is available.
+- **Linux and macOS.** There is no Windows build: the Rust crate refuses to compile on Windows, and the TypeScript CLI under Bun is only partially usable there — no OS keychain integration, no platform clipboard helpers, POSIX path assumptions — leaving OSC 52 in a capable terminal as the only copy path.
 - **Small static CLI.** Prebuilt Rust binaries are coming soon. Until then, build from [`rs/`](rs/) (`bun run build:rust`) or run the TypeScript tip of spear under [Bun](https://bun.sh) while developing (`bun src/index.ts` / `bun run build`).
 
 ## Install
 
 - **CLI** — download a release binary when published, or build as above. Then `sns login` (password + MFA if required), which syncs into the encrypted cache and drops the password. Login always confirms the email (pre-filled from `SN_EMAIL`); choose another address to switch accounts — you will be asked to logout the current session first.
+
+Where to put the binary (untar the release archive first):
+
+```sh
+# Linux — per user. Debian's default ~/.profile adds ~/.local/bin to PATH,
+# but only if the directory already exists at login: create it first.
+mkdir -p ~/.local/bin && install -m755 sns ~/.local/bin/sns
+
+# macOS — system-wide, already on the default PATH.
+sudo install -m755 sns /usr/local/bin/sns
+```
+
+Gatekeeper quarantines downloaded binaries on macOS: right-click → Open once, or `xattr -d com.apple.quarantine sns`.
 - **Extension** — load unpacked from a build of [`extension/`](extension/) (see [extension/README.md](extension/README.md)). Store listing is not in v1.
 
-Config lives in `~/.config/sn_secrets_cli/` (or `SNS_CONFIG_DIR`): plain `.env` (email, API URL), dotenvx-encrypted `.env.session`, optional `.env.keys` when there is no OS secret service, and `cache.db` (whole-file `chacha20`). Details: [SECURITY.md](SECURITY.md).
+Config lives in `~/.config/sn_secrets_cli/` (or `SNS_CONFIG_DIR`): plain `.env` (email, API URL), encrypted `.env.session` (dotenvx under the TypeScript CLI, `enc1:` under the Rust binary — not interchangeable), optional `.env.keys` when there is no OS secret service, and `cache.db` (whole-file `chacha20`). Details: [SECURITY.md](SECURITY.md).
 
 Tab completion for `show` / `copy` / `sink` (note ids, then setting keys):
 
@@ -95,7 +109,7 @@ copy a value:  sns copy staging DB_HOST
 
 ## Chrome extension
 
-Same vault rules in the browser. Popup searches every `KEY` and copies on click; dashboard shows the tag tree and a reveal/copy inventory. Clipboard clears in 30 s; auto-lock after idle / hidden tab. No content scripts; editing is not in v1. Setup and security model: [extension/README.md](extension/README.md).
+Same vault rules in the browser. Popup searches every `KEY` and copies on click; dashboard shows the tag tree and a reveal/copy inventory. Clipboard overwrite scheduled ~30 s after each copy (best-effort); auto-lock after idle / hidden tab, enforced by the background service worker. No content scripts; editing is not in v1. Setup and security model: [extension/README.md](extension/README.md).
 
 ## Repository layout
 
