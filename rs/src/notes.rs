@@ -384,7 +384,7 @@ fn ambiguous_items<T: Clone>(matches: &[&T], kind: &str, key: &dyn Fn(&T) -> (St
         .take(8)
         .map(|item| {
             let (uuid, title) = key(item);
-            format!("{}  {}", uuid.chars().take(8).collect::<String>(), title)
+            format!("{}  {}", sanitize_uuid(&uuid.chars().take(8).collect::<String>()), title)
         })
         .collect::<Vec<_>>()
         .join("\n");
@@ -920,6 +920,15 @@ fn copy_hint(query: &str, first_key: &str) -> String {
 /// Structured sequences go first, so the ESC that opened a real sequence is
 /// never eaten alone and left to print its payload raw. (Port of the TS
 /// `sanitizeText`.)
+/// sanitize_text for a uuid column (the TS sanitizeUuid): sanitize_text
+/// keeps newline and tab for prose, but a uuid is a single token — a
+/// server-supplied `\n` inside one would splice a fake row into a list or
+/// search render. Strip every whitespace character; a legitimate uuid (hex
+/// and dash) contains none.
+pub fn sanitize_uuid(raw: &str) -> String {
+    sanitize_text(raw).chars().filter(|c| !c.is_whitespace()).collect()
+}
+
 pub fn sanitize_text(text: &str) -> String {
     static CSI: std::sync::OnceLock<StdRegex> = std::sync::OnceLock::new();
     static OSC: std::sync::OnceLock<StdRegex> = std::sync::OnceLock::new();
@@ -1230,7 +1239,11 @@ fn list_row_line(note: &ListedNote, widths: (usize, usize, usize)) -> String {
         pad_end(&whitespace_collapse(&note.title), width_title),
         pad_end(&format_when(note.updated_at), width_when),
         format!("{:>width$}", note.settings, width = width_settings),
-        note.uuid.clone(),
+        // The uuid is the one plaintext, server-controlled field in a synced
+        // item: sanitize it like every other display sink here (the TS
+        // list_row wraps it in sanitizeUuid — newlines must not splice a
+        // fake row into the render).
+        sanitize_uuid(&note.uuid),
     ];
     let joined = fields.join("  ");
     joined.trim_end().to_string()

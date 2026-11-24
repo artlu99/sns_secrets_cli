@@ -3,7 +3,7 @@ import pc from "picocolors";
 import { scrubbedEnv, scrubbedEnvNames, assertSessionKeyNames } from "../env.ts";
 import { keychainGet, secretServiceAvailable } from "../keychain.ts";
 import { configDir, dbPath, ensureConfigDir, envPath, sessionPath, unexpectedConfigFiles } from "../paths.ts";
-import { loadSession, sessionKeyNames } from "../session-file.ts";
+import { keyDecryptsSession, loadSession, sessionKeyNames } from "../session-file.ts";
 import { openDatabase, sqliteMasterCount } from "../db.ts";
 
 type Status = "ok" | "FAIL" | "SKIP";
@@ -42,11 +42,17 @@ export async function doctorChecks(): Promise<Check[]> {
     checks.push({ name: "keychain", status: "SKIP", detail: "secret service is available; nothing stored yet" });
   } else {
     const stored = await keychainGet();
-    checks.push(
-      stored
-        ? { name: "keychain", status: "ok", detail: "dotenvx key retrieved" }
-        : { name: "keychain", status: "FAIL", detail: "session exists but the keychain has no dotenvx key" },
-    );
+    if (!stored) {
+      checks.push({ name: "keychain", status: "FAIL", detail: "session exists but the keychain has no dotenvx key" });
+    } else if (!keyDecryptsSession(stored)) {
+      checks.push({
+        name: "keychain",
+        status: "FAIL",
+        detail: "the keychain dotenvx key does not decrypt .env.session — run sns logout, then sns login",
+      });
+    } else {
+      checks.push({ name: "keychain", status: "ok", detail: "dotenvx key retrieved and matches the session" });
+    }
   }
 
   if (!existsSync(sessionPath())) {

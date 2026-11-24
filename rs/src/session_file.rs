@@ -187,7 +187,28 @@ pub fn load_session() -> Result<Option<SessionSecrets>, UserError> {
 
 /// Delete the session file, the keys file, and the keychain entry.
 pub fn delete_session() {
-    let _ = std::fs::remove_file(session_path());
-    let _ = std::fs::remove_file(keys_path());
-    keychain::keychain_delete();
+    // Captured before the sweep (mirrors src/session-file.ts deleteSession):
+    // a keys file present at delete time means custody was the file, which
+    // silences the unavailable-service keychain warning.
+    let file_custody = keys_path().exists();
+    // Exact names plus the crash-orphan temps: write_secret_file stages
+    // `.env.keys.tmp-<pid>-<suffix>` carrying the plaintext session scalar,
+    // and a SIGKILL mid-write leaves it behind — logout's amnesia promise
+    // covers it too. Regular files and symlinks (a planted link at
+    // .env.session is removed itself, never followed); a same-named
+    // directory is left for the operator.
+    if let Ok(entries) = std::fs::read_dir(crate::paths::config_dir()) {
+        for entry in entries.flatten() {
+            let removable = entry
+                .file_type()
+                .map(|t| t.is_file() || t.is_symlink())
+                .unwrap_or(false)
+                && crate::paths::is_owned_session_file_name(&entry.file_name().to_string_lossy());
+            if removable {
+                let _ = std::fs::remove_file(entry.path());
+            }
+        }
+    }
+    let result = keychain::keychain_delete();
+    keychain::warn_if_keychain_item_survived(result, file_custody);
 }

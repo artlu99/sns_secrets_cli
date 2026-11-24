@@ -114,9 +114,11 @@ export function readPlainConfig(): PlainConfig {
 const OWNED_ENV_KEYS = new Set(["SN_EMAIL", "SN_API_URL"]);
 
 /**
- * Every file sns creates in the config directory. `sns purge` deletes
- * exactly these; anything else in the directory is left in place and named
- * (the same set doctor's unexpected-files check flags).
+ * The exact-name core of what sns creates in the config directory. purge and
+ * deleteSession own the crash-orphan temp spellings on top of these
+ * (isOwnedSessionFileName / isOwnedConfigFileName); doctor's
+ * unexpected-files check uses the same ownership test, so an orphan temp
+ * reads as sns's own leftover, not a foreign file.
  */
 export const KNOWN_CONFIG_FILES = new Set([
   ".env",
@@ -129,6 +131,25 @@ export const KNOWN_CONFIG_FILES = new Set([
   "sync.lock",
   "clipboard-clear-at",
 ]);
+
+/**
+ * Sns-owned spellings of the session/keys files, including the crash-orphan
+ * temps: writePrivateFileSync stages `<path>.tmp-<pid>-<rand>` and dotenvx's
+ * write-file-atomic stages `<path>.<hash>` — a SIGKILL mid-write leaves the
+ * temp on disk, and the `.env.keys` one carries the plaintext session
+ * private key. The suffix is one hash segment or one `tmp-<pid>-<rand>`, so
+ * an operator's own `.env.session.bak.old` is NOT claimed. deleteSession and
+ * purge sweep these alongside the exact names above; anything matching
+ * neither set is left for the reader.
+ */
+export function isOwnedSessionFileName(name: string): boolean {
+  return name === ".env.session" || name === ".env.keys" || /^\.env\.(session|keys)\.(tmp-\d+-)?[0-9a-zA-Z]+$/.test(name);
+}
+
+/** purge's ownership test: the exact KNOWN_CONFIG_FILES names plus the orphan temps. */
+export function isOwnedConfigFileName(name: string): boolean {
+  return KNOWN_CONFIG_FILES.has(name) || isOwnedSessionFileName(name);
+}
 
 export function writePlainConfig(patch: Partial<PlainConfig>): void {
   ensureConfigDir();
@@ -186,5 +207,5 @@ export function writePrivateFileSync(path: string, data: string): void {
 
 export function unexpectedConfigFiles(): string[] {
   if (!existsSync(configDir())) return [];
-  return readdirSync(configDir()).filter((name) => !KNOWN_CONFIG_FILES.has(name));
+  return readdirSync(configDir()).filter((name) => !isOwnedConfigFileName(name));
 }

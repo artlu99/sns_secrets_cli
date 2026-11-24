@@ -3,7 +3,7 @@
 /// entrypoints/lib and their imports only) never see sqlite.d.ts otherwise.
 /// <reference path="./sqlite.d.ts" />
 import Sqlite from "better-sqlite3-multiple-ciphers";
-import { existsSync, rmSync } from "node:fs";
+import { chmodSync, existsSync, rmSync } from "node:fs";
 import { UserError } from "./errors.ts";
 import { isTrashed } from "./notes.ts";
 
@@ -71,6 +71,14 @@ export function openDatabase(path: string, dbKey: string): CacheDb {
     throw new UserError("database key must be 64 hex characters");
   }
   const db = new Sqlite(path, { timeout: 5000 });
+  // The decrypted corpus lives here: pin 0600 the moment the file exists.
+  // SQLite creates it at the umask default (0644) — the config directory's
+  // enforced 0700 is the only other thing keeping group/other out, and a
+  // widened directory (an operator chmod, a backup restore) would otherwise
+  // expose a world-readable file. The rollback journal and the -wal/-shm
+  // siblings copy the database file's mode at creation, so this one chmod
+  // covers them too. rs/src/db.rs pins the same mode.
+  chmodSync(path, 0o600);
   try {
     db.pragma("cipher = 'chacha20'");
     db.pragma(`key = '${dbKey}'`);

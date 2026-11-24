@@ -1,3 +1,4 @@
+import { clearCache } from "../lib/cache.ts";
 import { LOCK_ALARM_NAME, LOCK_STATE_KEY, remainingLockMs } from "../lib/lock-schedule.ts";
 import { getLockState, LOCK_OP_MESSAGE_TYPE, performLock, queueLockOp, type LockReason } from "../lib/lock-state.ts";
 import { DEFAULT_ORIGIN_RULE_ID, removeOriginRule } from "../lib/origin.ts";
@@ -78,6 +79,22 @@ export default defineBackground(() => {
   /** Serialization for the arms below (the queue itself never rejects). */
   let armQueue: Promise<unknown> = Promise.resolve();
 
+  /**
+   * Idempotent key-material wipe for the lock path. performLock removes the
+   * session and the decrypted cache after the locked flag lands; when that
+   * half fails or never runs — a storage.session error, or the pressing
+   * surface dying between the worker's lockState write and its follow-up
+   * removal — this backstop finishes the job. Every lock observation the
+   * worker makes (its own lock op, an arm while locked, a stale alarm fire)
+   * re-runs it: removing an already-removed key and clearing an empty cache
+   * are no-ops, so this is safe on every failure shape and cannot strand
+   * the master key, tokens, and cache in session storage behind locked=true.
+   */
+  async function wipeLockedSession(): Promise<void> {
+    await browser.storage.session.remove(SESSION_KEY).catch(() => {});
+    await clearCache().catch(() => {});
+  }
+
   /** (Re)create the auto-lock alarm from the stored state; clears it if locked. */
   function armAutoLockAlarm(minDelayMs = 0): Promise<void> {
     // Serialized: each arm reads the state and creates the alarm only after
@@ -90,6 +107,9 @@ export default defineBackground(() => {
       const state = await getLockState();
       if (state.locked) {
         await browser.alarms.clear(LOCK_ALARM_NAME);
+        // locked=true with material still present is exactly the half-done
+        // wipe state — retry the removals instead of only clearing the timer.
+        await wipeLockedSession();
         return;
       }
       const fireAt = Date.now() + Math.max(minDelayMs, remainingLockMs(state, Date.now()));
@@ -111,7 +131,12 @@ export default defineBackground(() => {
     if (alarm.name !== LOCK_ALARM_NAME) return;
     void (async () => {
       const state = await getLockState();
-      if (state.locked) return;
+      if (state.locked) {
+        // A fire on an already-locked state is a retry signal for a wipe
+        // that never finished; complete it instead of returning bare.
+        await wipeLockedSession();
+        return;
+      }
       // Stale fire (activity landed after the alarm was scheduled): re-arm
       // for what is left instead of locking an active vault.
       if (remainingLockMs(state, Date.now()) > 0) {
@@ -234,8 +259,17 @@ export default defineBackground(() => {
       // unlock (and ask for a lock, with its reason) here, and this worker
       // applies every lockState mutation through one serialized queue — a
       // surface's report can never interleave with the alarm's lock and
-      // regress the state.
-      return queueLockOp(message.op as Parameters<typeof queueLockOp>[0], message.reason as LockReason | undefined);
+      // regress the state. When the op locked the vault, the worker also
+      // runs the key-material removals itself: the surface's own follow-up
+      // wipe stays as a redundant second backstop, so a surface dying in the
+      // milliseconds after the flag landed can no longer strand the session
+      // and cache behind locked=true.
+      return queueLockOp(message.op as Parameters<typeof queueLockOp>[0], message.reason as LockReason | undefined).then(
+        async (state) => {
+          if (state.locked) await wipeLockedSession();
+          return state;
+        },
+      );
     }
     if (message?.type === "sns:origin-rules") {
       // Surfaces await this before their first API POST, so a fresh

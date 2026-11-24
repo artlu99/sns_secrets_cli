@@ -9,6 +9,7 @@
 //! implementations read each other's caches byte-for-byte.
 
 use rusqlite::{params, Connection, ErrorCode, Error as SqliteError, OptionalExtension};
+use std::os::unix::fs::PermissionsExt;
 use std::path::Path;
 
 pub struct CacheDb {
@@ -84,6 +85,14 @@ pub fn is_wrong_key_database(error: &SqliteError) -> bool {
 
 fn open_connection(path: &Path) -> Result<Connection, DbError> {
     let conn = Connection::open(path).map_err(DbError::from)?;
+    // Pin the cache file to 0600: SQLite creates it at the umask default
+    // (0644), and the decrypted corpus deserves file-level protection even
+    // if the config directory's 0700 is ever widened. The rollback journal
+    // and the -wal/-shm siblings copy the database file's mode at creation,
+    // so this one chmod covers them too. Mirrors src/db.ts openDatabase.
+    let mode = std::fs::Permissions::from_mode(0o600);
+    std::fs::set_permissions(path, mode)
+        .map_err(|error| DbError::Sqlite(format!("could not restrict cache.db permissions: {error}")))?;
     conn.busy_timeout(std::time::Duration::from_millis(5000)).map_err(DbError::from)?;
     Ok(conn)
 }

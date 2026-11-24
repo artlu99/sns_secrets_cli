@@ -269,9 +269,11 @@ pub fn write_plain_config(email: Option<&str>, api_url: Option<&str>) -> Result<
     Ok(())
 }
 
-/// Every file sns creates in the config directory. `sns purge` deletes
-/// exactly these; anything else is left in place and named (the same set
-/// doctor's unexpected-files check flags).
+/// The exact-name core of what sns creates in the config directory. purge and
+/// delete_session own the crash-orphan temp spellings on top of these
+/// (is_owned_session_file_name / is_owned_config_file_name); doctor's
+/// unexpected-files check uses the same ownership test, so an orphan temp
+/// reads as sns's own leftover, not a foreign file.
 pub const KNOWN_CONFIG_FILES: [&str; 9] = [
     ".env",
     ".env.session",
@@ -284,6 +286,42 @@ pub const KNOWN_CONFIG_FILES: [&str; 9] = [
     "clipboard-clear-at",
 ];
 
+/// Sns-owned spellings of the session/keys files, including the crash-orphan
+/// temps: write_secret_file stages `<path>.tmp-<pid>-<suffix>` and a crash
+/// mid-write leaves the temp on disk — the `.env.keys` one carries the
+/// plaintext session scalar. The suffix is one hash segment or one
+/// `tmp-<pid>-<rand>`, so an operator's own `.env.session.bak.old` is NOT
+/// claimed (mirrors src/paths.ts isOwnedSessionFileName).
+pub fn is_owned_session_file_name(name: &str) -> bool {
+    if name == ".env.session" || name == ".env.keys" {
+        return true;
+    }
+    let Some(rest) = name
+        .strip_prefix(".env.session.")
+        .or_else(|| name.strip_prefix(".env.keys."))
+    else {
+        return false;
+    };
+    let suffix = match rest.strip_prefix("tmp-") {
+        Some(after) => match after.split_once('-') {
+            Some((pid, rand)) if !pid.is_empty() && pid.bytes().all(|b| b.is_ascii_digit()) => {
+                if rand.is_empty() {
+                    return false;
+                }
+                rand
+            }
+            _ => return false,
+        },
+        None => rest,
+    };
+    !suffix.is_empty() && suffix.bytes().all(|b| b.is_ascii_alphanumeric())
+}
+
+/// purge's ownership test: the exact KNOWN_CONFIG_FILES names plus the orphan temps.
+pub fn is_owned_config_file_name(name: &str) -> bool {
+    KNOWN_CONFIG_FILES.contains(&name) || is_owned_session_file_name(name)
+}
+
 pub fn unexpected_config_files() -> Vec<String> {
     let Ok(entries) = std::fs::read_dir(config_dir()) else {
         return Vec::new();
@@ -291,7 +329,7 @@ pub fn unexpected_config_files() -> Vec<String> {
     entries
         .filter_map(|entry| entry.ok())
         .map(|entry| entry.file_name().to_string_lossy().into_owned())
-        .filter(|name| !KNOWN_CONFIG_FILES.contains(&name.as_str()))
+        .filter(|name| !is_owned_config_file_name(name))
         .collect()
 }
 

@@ -67,6 +67,16 @@ export class ApiError extends UserError {
 const sleepMs = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
 
 /**
+ * Per-attempt client timeout (mirrors src/http.ts, like the Rust client's
+ * guard): a fetch that never answers would otherwise wedge the service
+ * worker's shared refresh slot — one hung POST coalesced every later
+ * REFRESH caller onto the same never-settling promise. AbortSignal.timeout
+ * is available in service workers (Chrome 103+). Rebuilt each attempt, so
+ * every retry gets a fresh timer.
+ */
+const REQUEST_TIMEOUT_MS = 120_000;
+
+/**
  * One request, with 429 backoff (3 tries) and a single 401/498 refresh.
  * The unauthorized hook runs at most once, so a bad refresh cannot loop.
  */
@@ -80,7 +90,17 @@ export async function sendJson(
   let unauthorizedUsed = false;
   let attempt = 0;
   while (true) {
-    const response = await fetchImpl(url, init);
+    let response: Response;
+    try {
+      response = await fetchImpl(url, { ...init, signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
+    } catch (error) {
+      // No caller passes a signal, so TimeoutError/AbortError can only come
+      // from the per-attempt timer above.
+      if (error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError")) {
+        throw new UserError(`the API did not answer within ${REQUEST_TIMEOUT_MS / 1000}s — request aborted`);
+      }
+      throw error;
+    }
     if (response.status === 429 && attempt < 2) {
       await response.arrayBuffer().catch(() => undefined);
       await sleep(1000 * 2 ** attempt);

@@ -21,7 +21,12 @@ export default defineConfig({
     // api.standardnotes.com is declared outright; a self-hosted API URL is
     // requested (user gesture, at first login) via optional permissions.
     host_permissions: ["https://api.standardnotes.com/*"],
-    optional_host_permissions: ["http://*/*", "https://*/*"],
+    // http stays loopback-only: normalizeApiUrl (lib/session.ts) refuses
+    // every plaintext host except localhost/127.0.0.1, and Chrome match
+    // patterns are port-agnostic, so these two patterns cover exactly the
+    // http origins the unlock flow can ever request — no wildcard http
+    // breadth beyond what the code can ask for.
+    optional_host_permissions: ["https://*/*", "http://localhost/*", "http://127.0.0.1/*"],
     icons: {
       "16": "icons/16.png",
       "32": "icons/32.png",

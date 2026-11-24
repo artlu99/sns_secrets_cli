@@ -81,6 +81,18 @@ print **Finished**, then Reload.
   after the wipe. Durations are constants at the top of `lib/lock-schedule.ts`.
 - MV3 CSP: no remote code; `'wasm-unsafe-eval'` is present solely so
   libsodium's WASM can run.
+- **Client-identity headers are spoofed, on purpose.** Requests pin the
+  official Standard Notes desktop client's `X-SNJS-Version` /
+  `X-Application-Version` values, and `CLIENT_HEADERS` (`lib/http.ts`) also
+  requests the desktop client's User-Agent — which Chromium silently drops
+  from `fetch()`-set headers (User-Agent is a forbidden header name, since
+  Chromium bug 571722), so extension requests actually carry Chromium's own
+  UA. The CLI's requests (Bun is not a browser) do present the spoofed UA.
+  The hosted API gates and version-checks on client identity, and an honest
+  third-party identity risks rejection; the cost is that a server operator
+  cannot fully distinguish this client from the official desktop one.
+  Recorded here so the falsified identity is an auditable decision, not an
+  accident.
 
 ## Development
 

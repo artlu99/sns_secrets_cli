@@ -7,15 +7,30 @@ import {
   fstatSync,
   lstatSync,
   openSync,
+  readdirSync,
   readFileSync,
   rmSync,
   statSync,
 } from "node:fs";
+import { join } from "node:path";
 import { parse, set } from "@dotenvx/dotenvx";
 import { UserError } from "./errors.ts";
 import { SESSION_VALUE_KEYS, assertSessionKeyNames, type SessionValueKey } from "./env.ts";
-import { keychainDelete, keychainGet, keychainPut, secretServiceAvailable } from "./keychain.ts";
-import { ensureConfigDir, keysPath, sessionPath, writePrivateFileSync } from "./paths.ts";
+import {
+  keychainDelete,
+  keychainGet,
+  keychainPut,
+  secretServiceAvailable,
+  warnIfKeychainItemSurvived,
+} from "./keychain.ts";
+import {
+  configDir,
+  ensureConfigDir,
+  isOwnedSessionFileName,
+  keysPath,
+  sessionPath,
+  writePrivateFileSync,
+} from "./paths.ts";
 
 process.env.DOTENV_CONFIG_QUIET ??= "true";
 
@@ -102,6 +117,41 @@ function sessionHasPublicKey(): boolean {
 }
 
 /**
+ * Trial-decrypt the session file with a candidate private key. dotenvx's
+ * parse does not throw on a wrong key — it hands back the raw `encrypted:`
+ * strings — so both the throw path and the leftover-ciphertext path mean
+ * "this key does not open this session". saveSession refuses to write over
+ * a session no available key opens (dotenvx would re-encrypt every new value
+ * to the file's orphaned public key and report success), and doctor uses it
+ * to say whether the keychain key actually matches the session.
+ */
+export function keyDecryptsSession(key: string): boolean {
+  if (!existsSync(sessionPath())) return false;
+  // dotenvx logs one `☠ [WRONG/INVALID_PRIVATE_KEY] … '<name>=<first 7 hex
+  // chars>…'` line per field when the key does not match — noise on every
+  // trial of a non-matching candidate, and it echoes key material prefixes.
+  // It reaches the terminal through console.error (Bun's console does not
+  // route through process.stderr.write), so both are intercepted. parse is
+  // synchronous, so this silences exactly this call and nothing else.
+  const write = process.stderr.write;
+  const log = console.error;
+  process.stderr.write = () => true;
+  console.error = () => {};
+  let parsed: Record<string, string>;
+  try {
+    try {
+      parsed = parse(readFileSync(sessionPath(), "utf8"), { privateKey: key });
+    } finally {
+      process.stderr.write = write;
+      console.error = log;
+    }
+  } catch {
+    return false;
+  }
+  return !SESSION_VALUE_KEYS.some((name) => typeof parsed[name] === "string" && parsed[name]!.startsWith("encrypted:"));
+}
+
+/**
  * .env.session is 0600 from the instant it exists. Pre-create the file
  * O_EXCL|O_NOFOLLOW at 0600 when absent (an umask-proof fchmod, an fstat
  * assertion) and tighten an existing file before any write — repairing a
@@ -170,6 +220,22 @@ export async function saveSession(secrets: SessionSecrets): Promise<{ keychain: 
     // keep going; the write below surfaces real failures
   }
   const keychainKey = await keychainGet();
+  // A session no available private key opens must not be written over:
+  // dotenvx encrypts to whatever public key the file carries and reports
+  // success even when nothing can ever decrypt the result — a stale keychain
+  // item (or a lost key) would silently brick the session while the custody
+  // message claims the opposite. `sns logout` deletes the unreadable file;
+  // the next login bootstraps fresh.
+  if (sessionHasPublicKey()) {
+    const fileKey = readPrivateKeyFile();
+    const opens =
+      (keychainKey !== null && keyDecryptsSession(keychainKey)) || (fileKey !== null && keyDecryptsSession(fileKey));
+    if (!opens) {
+      throw new UserError(
+        ".env.session is encrypted to a dotenvx key sns cannot find — run `sns logout` to delete it, then `sns login` again",
+      );
+    }
+  }
   const inject = keychainKey !== null && !existsSync(keysPath()) && sessionHasPublicKey();
   const previousKey = process.env.DOTENV_PRIVATE_KEY_SESSION;
   if (inject) {
@@ -262,7 +328,24 @@ export async function loadSession(): Promise<SessionSecrets | null> {
 }
 
 export async function deleteSession(): Promise<void> {
-  if (existsSync(sessionPath())) rmSync(sessionPath(), { force: true });
-  if (existsSync(keysPath())) rmSync(keysPath(), { force: true });
-  await keychainDelete();
+  // Captured before the sweep: a keys file present at delete time means
+  // custody was the file (the keychain never held this session's key on a
+  // machine like this), which silences the unavailable-service warning.
+  const fileCustody = existsSync(keysPath());
+  // Exact names plus the crash-orphan temps: a SIGKILL mid-write leaves a
+  // 0600 `.env.keys.tmp-*` carrying the plaintext session private key on
+  // disk, and logout's amnesia promise covers it too. Regular files and
+  // symlinks (a planted link at .env.session is removed itself, never
+  // followed); a same-named directory is left for the operator. Runs under
+  // the sync lock, so a concurrent save cannot have a temp mid-flight here.
+  const dir = configDir();
+  if (existsSync(dir)) {
+    for (const entry of readdirSync(dir, { withFileTypes: true })) {
+      if ((entry.isFile() || entry.isSymbolicLink()) && isOwnedSessionFileName(entry.name)) {
+        rmSync(join(dir, entry.name), { force: true });
+      }
+    }
+  }
+  const result = await keychainDelete();
+  warnIfKeychainItemSurvived(result, { fileCustody });
 }

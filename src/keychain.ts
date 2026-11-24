@@ -1,4 +1,5 @@
 import { spawn } from "node:child_process";
+import pc from "picocolors";
 import { scrubbedEnv } from "./env.ts";
 
 const SERVICE = "sn_secrets_cli";
@@ -79,11 +80,60 @@ export async function keychainPut(secret: string): Promise<boolean> {
   return result.code === 0;
 }
 
-export async function keychainDelete(): Promise<void> {
-  if (!(await secretServiceAvailable())) return;
-  if (process.platform === "darwin") {
-    await run("security", ["delete-generic-password", "-s", SERVICE, "-a", ACCOUNT]);
-    return;
+/**
+ * Outcome of a keychain removal. "deleted" — the tool exited 0. "unavailable"
+ * — no secret service answered, so the item's state is unknown and it is
+ * probably still there (login stored it while the service was up). "unconfirmed"
+ * — the delete tool failed or could not be spawned; the item may be absent
+ * (macOS reports missing items as failure) or may still exist, so callers
+ * warn with the manual removal command either way.
+ */
+export type KeychainDeleteResult = "deleted" | "unconfirmed" | "unavailable";
+
+/**
+ * The one warning every keychain-removal path owes the operator when the
+ * item's deletion could not be confirmed: logout/purge claim their cleanup
+ * succeeded, and a live dotenvx key silently surviving in the keyring is
+ * the one outcome this text exists to surface. Static text only — never a
+ * secret value. `context.fileCustody` — true when `.env.keys` existed at
+ * deletion time — silences the "unavailable" case: on a machine whose
+ * secret service never answered, keychainPut always failed, custody was
+ * necessarily the file, and no keychain item can exist to warn about.
+ * "unconfirmed" (the service answered but the delete failed) always warns —
+ * a missing item is indistinguishable from a live one.
+ */
+export function warnIfKeychainItemSurvived(
+  result: KeychainDeleteResult,
+  context: { fileCustody?: boolean } = {},
+): void {
+  if (result === "deleted") return;
+  if (result === "unavailable" && context.fileCustody) return;
+  const tool =
+    process.platform === "darwin"
+      ? "security delete-generic-password -s sn_secrets_cli -a dotenvkey"
+      : "secret-tool clear service sn_secrets_cli account dotenvkey";
+  const why = result === "unavailable" ? "no secret service answered" : "the delete command failed";
+  console.error(pc.yellow(`the keychain item could not be confirmed deleted (${why}) — if present, remove it with: ${tool}`));
+}
+
+/**
+ * Best-effort removal that never rejects and never no-ops silently: logout
+ * and purge must finish their local deletions and say so even when the
+ * keychain half cannot be confirmed — a live dotenvx key stranded in the
+ * keyring with a success outro is the one outcome this return value exists
+ * to prevent. (The Rust port's keychain_delete has always been infallible.)
+ */
+export async function keychainDelete(): Promise<KeychainDeleteResult> {
+  if (!(await secretServiceAvailable())) return "unavailable";
+  try {
+    if (process.platform === "darwin") {
+      const result = await run("security", ["delete-generic-password", "-s", SERVICE, "-a", ACCOUNT]);
+      return result.code === 0 ? "deleted" : "unconfirmed";
+    }
+    const result = await run("secret-tool", ["clear", "service", SERVICE, "account", ACCOUNT]);
+    return result.code === 0 ? "deleted" : "unconfirmed";
+  } catch {
+    // Spawn-level failure (binary missing, EACCES): report, don't abort.
+    return "unconfirmed";
   }
-  await run("secret-tool", ["clear", "service", SERVICE, "account", ACCOUNT]);
 }

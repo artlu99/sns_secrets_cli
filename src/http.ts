@@ -59,6 +59,17 @@ export class ApiError extends UserError {
 }
 
 /**
+ * Per-attempt client timeout. Bun's fetch (and a service-worker fetch) stays
+ * pending forever against a connection that accepts and then sends no bytes
+ * — a NAT idle drop or hung proxy wedged `sns sync` until Ctrl-C, and in the
+ * extension it poisoned the shared refresh slot for every later caller. The
+ * Rust client has carried this 120s guard since its first release
+ * (rs/src/http.rs); this is the same guard on the TS side. The signal is
+ * rebuilt each attempt, so every retry gets a fresh timer.
+ */
+const REQUEST_TIMEOUT_MS = 120_000;
+
+/**
  * One request, with 429 backoff (3 tries) and a single 401/498 refresh.
  * The unauthorized hook runs at most once, so a bad refresh cannot loop.
  */
@@ -72,7 +83,17 @@ export async function sendJson(
   let unauthorizedUsed = false;
   let attempt = 0;
   while (true) {
-    const response = await fetchImpl(url, init);
+    let response: Response;
+    try {
+      response = await fetchImpl(url, { ...init, signal: AbortSignal.timeout(REQUEST_TIMEOUT_MS) });
+    } catch (error) {
+      // AbortSignal.timeout names TimeoutError (some runtimes AbortError);
+      // neither can be a caller abort — no caller passes a signal.
+      if (error instanceof Error && (error.name === "TimeoutError" || error.name === "AbortError")) {
+        throw new UserError(`the API did not answer within ${REQUEST_TIMEOUT_MS / 1000}s — request aborted`);
+      }
+      throw error;
+    }
     if (response.status === 429 && attempt < 2) {
       await response.arrayBuffer().catch(() => undefined);
       await sleep(1000 * 2 ** attempt);

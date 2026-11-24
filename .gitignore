@@ -1,6 +1,7 @@
 # dependencies (bun install)
+# bun.lock stays tracked: it is the integrity record for the dependency graph
+# compiled into dist/sns and the extension zip (Cargo.lock is tracked too).
 node_modules
-bun.lock
 
 # output
 out
@@ -20,10 +21,14 @@ rs/target
 PLAN.md
 PLAN?.md
 
-# sn_secrets_cli: secrets & encrypted cache never get committed
-.env.session
-.env.keys
+# sn_secrets_cli: secrets & encrypted cache never get committed — including
+# the crash-orphan temp spellings (writePrivateFileSync `.tmp-<pid>-<rand>`
+# and write-file-atomic `<hash>` suffixes), whose .env.keys temps carry the
+# plaintext session private key
+.env.session*
+.env.keys*
 *.db
+*.db-*
 !rs/tests/fixtures/cache-v0.2.0.db
 PLAN?.md
 CLAUDE.md

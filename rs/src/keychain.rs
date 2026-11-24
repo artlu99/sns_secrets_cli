@@ -135,12 +135,50 @@ pub fn keychain_put(secret: &str) -> bool {
     }
 }
 
-pub fn keychain_delete() {
+/// Outcome of a keychain removal (mirrors src/keychain.ts KeychainDeleteResult).
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum KeychainDeleteResult {
+    /// The delete tool exited 0.
+    Deleted,
+    /// The tool failed or could not be spawned: the item may be absent (macOS
+    /// reports missing items as failure) or may still exist — callers warn.
+    Unconfirmed,
+    /// No secret service answered: the item's state is unknown, probably present.
+    Unavailable,
+}
+
+/// Best-effort removal that never panics and never no-ops silently (the Rust
+/// side has always been infallible; the return value now says what happened).
+pub fn keychain_delete() -> KeychainDeleteResult {
     if !secret_service_available() {
-        return;
+        return KeychainDeleteResult::Unavailable;
     }
-    let _ = match platform() {
+    let result = match platform() {
         "darwin" => run("security", &["delete-generic-password", "-s", SERVICE, "-a", ACCOUNT], None),
         _ => run("secret-tool", &["clear", "service", SERVICE, "account", ACCOUNT], None),
     };
+    match result {
+        Ok(output) if output.code == 0 => KeychainDeleteResult::Deleted,
+        Ok(_) => KeychainDeleteResult::Unconfirmed,
+        Err(_) => KeychainDeleteResult::Unconfirmed,
+    }
+}
+
+/// The one warning every keychain-removal path owes the operator when the
+/// item's deletion could not be confirmed (mirrors src/keychain.ts
+/// warnIfKeychainItemSurvived). `file_custody` — true when `.env.keys`
+/// existed at deletion time — silences the Unavailable case: on a machine
+/// whose secret service never answers, custody was necessarily the file and
+/// no keychain item can exist to warn about.
+pub fn warn_if_keychain_item_survived(result: KeychainDeleteResult, file_custody: bool) {
+    match result {
+        KeychainDeleteResult::Deleted => {}
+        KeychainDeleteResult::Unavailable if file_custody => {}
+        KeychainDeleteResult::Unavailable => eprintln!(
+            "the keychain item could not be confirmed deleted (no secret service answered) — if present, remove it with: secret-tool clear service {SERVICE} account {ACCOUNT}"
+        ),
+        KeychainDeleteResult::Unconfirmed => eprintln!(
+            "the keychain item could not be confirmed deleted (the delete command failed) — if present, remove it with: secret-tool clear service {SERVICE} account {ACCOUNT}"
+        ),
+    }
 }

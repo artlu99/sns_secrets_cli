@@ -171,7 +171,11 @@ function noteIdCandidates(db: CacheDb | null): string[] {
       out.push(title);
     }
     const short = row.uuid.slice(0, 8);
-    if (!seen.has(short) && resolves(short)) {
+    // Only offer hex/dash prefixes — the shape resolveByPrefix's uuid branch
+    // accepts. The uuid is server-controlled plaintext and a candidate lands
+    // on the command line, so anything else (escapes, a newline that would
+    // splice a second command into the line, spaces) is never offered.
+    if (/^[0-9a-f-]{8}$/i.test(short) && !seen.has(short) && resolves(short)) {
       seen.add(short);
       out.push(short);
     }

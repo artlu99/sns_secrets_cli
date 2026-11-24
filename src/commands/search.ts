@@ -1,5 +1,5 @@
 import { UserError } from "../errors.ts";
-import { formatWhen, searchNotes } from "../notes.ts";
+import { formatWhen, sanitizeUuid, searchNotes } from "../notes.ts";
 import { openCache } from "./list.ts";
 
 export async function searchCommand(
@@ -17,7 +17,7 @@ export async function searchCommand(
       return;
     }
     const lines = hits.map(
-      (hit) => `${hit.uuid}  ${formatWhen(hit.updated_at)}  ${hit.title}\n  ${hit.snippet}`,
+      (hit) => `${sanitizeUuid(hit.uuid)}  ${formatWhen(hit.updated_at)}  ${hit.title}\n  ${hit.snippet}`,
     );
     console.log(lines.join("\n"));
   } finally {

@@ -2,9 +2,9 @@ import { existsSync, readdirSync, rmSync } from "node:fs";
 import { join } from "node:path";
 import { intro, outro } from "@clack/prompts";
 import { UserError } from "../errors.ts";
-import { keychainDelete } from "../keychain.ts";
+import { keychainDelete, warnIfKeychainItemSurvived } from "../keychain.ts";
 import { acquireSyncLock } from "../lock.ts";
-import { KNOWN_CONFIG_FILES, configDir, sessionPath } from "../paths.ts";
+import { configDir, isOwnedConfigFileName, sessionPath } from "../paths.ts";
 import { promptConfirm } from "./prompt.ts";
 
 /**
@@ -21,9 +21,20 @@ export async function purgeCommand(options: { yes?: boolean } = {}): Promise<voi
   if (!existsSync(dir)) {
     throw new UserError(`nothing to purge — ${dir} does not exist`);
   }
-  const entries = readdirSync(dir);
-  const known = entries.filter((name) => KNOWN_CONFIG_FILES.has(name));
-  const unknown = entries.filter((name) => !KNOWN_CONFIG_FILES.has(name));
+  // Ownership is pattern-based, not exact-name: a crash mid-write leaves
+  // `.env.keys.tmp-<pid>-<rand>` / `.env.session.<hash>` temps on disk, and
+  // the .env.keys ones carry the plaintext session private key — the
+  // scorched-earth contract ("every file sns created") has to cover them or
+  // a decommission purge silently keeps a live credential. Only regular
+  // files are swept; anything else is left for the operator to inspect.
+  const dirents = readdirSync(dir, { withFileTypes: true });
+  const known = dirents
+    .filter((entry) => (entry.isFile() || entry.isSymbolicLink()) && isOwnedConfigFileName(entry.name))
+    .map((entry) => entry.name);
+  const unknown = dirents.filter((entry) => !isOwnedConfigFileName(entry.name)).map((entry) => entry.name);
+  // Captured before the deletion: a keys file among the owned names means
+  // custody was the file, which silences the unavailable-service warning.
+  const fileCustody = known.includes(".env.keys");
   if (known.length === 0 && unknown.length === 0) {
     rmSync(dir, { recursive: true, force: true });
     outro(`${dir} had nothing in it — removed`);
@@ -58,7 +69,9 @@ export async function purgeCommand(options: { yes?: boolean } = {}): Promise<voi
   const release = await acquireSyncLock();
   try {
     for (const name of known) rmSync(join(dir, name), { force: true });
-    await keychainDelete();
+    // A purge that cannot confirm the keychain item's deletion must say so:
+    // the dotenvx key is the one secret that outlives every file above.
+    warnIfKeychainItemSurvived(await keychainDelete(), { fileCustody });
   } finally {
     release();
   }

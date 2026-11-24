@@ -28,7 +28,7 @@
     "clippy:rust": "cargo clippy --manifest-path rs/Cargo.toml --all-targets"
   },
   "devDependencies": {
-    "@types/bun": "latest",
+    "@types/bun": "1.4.4",
     "playwright": "^1.65.1"
   },
   "peerDependencies": {

@@ -47,8 +47,10 @@ impl ReqwestFetch {
         // Install the ring provider once; a second install is a no-op.
         let _ = rustls::crypto::ring::default_provider().install_default();
         let client = reqwest::blocking::Client::builder()
-            // The TS client sets no timeout; this guards against hung
-            // connections without cutting off slow syncs.
+            // The 120s per-request guard against hung connections — the TS
+            // client now carries the same guard (src/http.ts
+            // AbortSignal.timeout, REQUEST_TIMEOUT_MS); slow syncs still get
+            // well over a minute per request.
             .timeout(std::time::Duration::from_secs(120))
             .build()
             .map_err(|error| HttpError::Network(error.to_string()))?;

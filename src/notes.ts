@@ -283,7 +283,7 @@ function ambiguousItems<T>(
     .slice(0, 8)
     .map((item) => {
       const entry = key(item);
-      return `${entry.uuid.slice(0, 8)}  ${entry.title}`;
+      return `${sanitizeUuid(entry.uuid.slice(0, 8))}  ${entry.title}`;
     })
     .join("\n");
   return new UserError(`that matches ${matches.length} ${kind}s; be more specific:\n${sample}`);
@@ -643,6 +643,16 @@ export function sanitizeText(text: string): string {
 }
 
 /**
+ * sanitizeText for a uuid column: the prose sink keeps newline and tab (its
+ * contract), but a uuid is a single token — a server-supplied `\n` inside
+ * one would splice a fake row into a list or search render. Strip every
+ * whitespace character; a legitimate uuid (hex and dash) contains none.
+ */
+export function sanitizeUuid(raw: string): string {
+  return sanitizeText(raw).replace(/\s+/g, "");
+}
+
+/**
  * Mask `key=value` fragments in free text the inventory renders verbatim. The
  * parser rejects these lines (a commented-out `# OLD_KEY=…`, a mention
  * mid-sentence, one in parentheses or quotes), so a value written that way
@@ -817,7 +827,11 @@ export function renderTagGroups(graph: TagGraph, notes: ListedNote[]): string {
       note.title.replace(/\s+/g, " ").padEnd(widths[0] ?? 0),
       formatWhen(note.updated_at).padEnd(widths[1] ?? 0),
       String(note.settings).padStart(widths[2] ?? 0),
-      note.uuid,
+      // The uuid is the one plaintext, server-controlled field in a synced
+      // item: sanitize it like every other display sink here — a poisoned
+      // uuid must not restyle, retitle, write to, or splice a row into the
+      // pane (sanitizeUuid strips the newlines sanitizeText keeps for prose).
+      sanitizeUuid(note.uuid),
     ].join("  ").trimEnd()}`;
 
   // A block is [header, rows…, child blocks…]; null when nothing shows under it.

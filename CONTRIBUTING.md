@@ -21,6 +21,18 @@ Threat model and unlock chain: [SECURITY.md](SECURITY.md). Extension setup: [ext
 bun install
 ```
 
+`bun.lock` is tracked — it is the integrity record for the dependency graph
+that `bun build --compile` bakes into `dist/sns` and that ships in the
+extension zip (the Rust side's equivalent, `rs/Cargo.lock`, is tracked too).
+Release-style installs should fail rather than re-resolve:
+
+```bash
+bun install --frozen-lockfile
+```
+
+Bump dependencies deliberately: change the manifest, run a plain `bun
+install` to move the lockfile, commit both together.
+
 ## Scripts (repo root)
 
 ```bash

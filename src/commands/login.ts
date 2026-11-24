@@ -39,7 +39,10 @@ export async function loginCommand(): Promise<void> {
       // `sns login` is the recovery path for a broken session — it must not
       // fail on the very state it exists to fix.
       const reason = sanitizeText(error instanceof Error ? error.message : "unreadable session file");
-      console.error(pc.yellow(`the existing session is unreadable and will be replaced (${reason})`));
+      // "try to replace", not "will replace": if no available key decrypts
+      // the file, saveSession refuses below (it will not silently re-encrypt
+      // to an orphaned public key) and `sns logout` remains the way out.
+      console.error(pc.yellow(`the existing session is unreadable; login will try to replace it (${reason})`));
     }
   }
   if (existing?.accountEmail && existing.accountEmail !== email) {

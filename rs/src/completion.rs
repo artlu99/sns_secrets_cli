@@ -209,7 +209,14 @@ fn note_id_candidates(db: Option<&CacheDb>) -> Vec<String> {
             out.push(title);
         }
         let short: String = row.0.chars().take(8).collect();
-        if !seen.contains(&short) && resolves(&short) {
+        // Only hex/dash prefixes are offered — the shape the resolver's uuid
+        // branch accepts. The uuid is server-controlled plaintext and a
+        // candidate lands on the command line, so anything else (escapes, a
+        // newline that would splice a second command into the line, spaces)
+        // is never offered (mirrors the TS completion guard).
+        let looks_like_uuid = short.chars().count() == 8
+            && short.chars().all(|c| c.is_ascii_hexdigit() || c == '-');
+        if looks_like_uuid && !seen.contains(&short) && resolves(&short) {
             seen.insert(short.clone());
             out.push(short);
         }

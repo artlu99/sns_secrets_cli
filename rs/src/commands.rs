@@ -16,6 +16,7 @@ use crate::kdf::derive_root_key;
 use crate::lock::acquire_sync_lock;
 use crate::notes::{
     sanitize_text,
+    sanitize_uuid,
     tag_forest,
     format_when, json_string, list_notes, note_body, note_scan, pad_end, plan_copy,
     render_copy_keys, render_note_inventory, render_tag_groups, render_untagged_table,
@@ -25,7 +26,7 @@ use crate::notes::{
 use crate::pager::{page_if_tall, write_stdout, PageOptions};
 use crate::paths::{
     config_dir, db_path, ensure_config_dir, env_path, keys_path, read_plain_config, session_path,
-    unexpected_config_files, write_plain_config, DEFAULT_API_URL, KNOWN_CONFIG_FILES,
+    is_owned_config_file_name, unexpected_config_files, write_plain_config, DEFAULT_API_URL,
 };
 use crate::prompt::{prompt_confirm, prompt_line, prompt_secret};
 use crate::session_file::{delete_session, load_session, persist, save_session, session_key_names};
@@ -611,13 +612,18 @@ pub fn purge_command(yes: bool) -> Result<(), UserError> {
     let mut known: Vec<String> = Vec::new();
     let mut unknown: Vec<String> = Vec::new();
     for entry in std::fs::read_dir(&dir).map_err(|error| UserError(error.to_string()))? {
-        let name = entry
-            .map_err(|error| UserError(error.to_string()))?
-            .file_name()
-            .to_string_lossy()
-            .to_string();
-        if KNOWN_CONFIG_FILES.contains(&name.as_str()) {
-            known.push(name);
+        let entry = entry.map_err(|error| UserError(error.to_string()))?;
+        let name = entry.file_name().to_string_lossy().to_string();
+        // Ownership is pattern-based, not exact-name: a crash mid-write
+        // leaves `.env.keys.tmp-<pid>-<suffix>` temps carrying the plaintext
+        // session scalar — the scorched-earth contract ("every file sns
+        // created") has to cover them or a decommission purge silently keeps
+        // a live credential. Regular files and symlinks only.
+        let is_file_or_link = entry.file_type().map(|t| t.is_file() || t.is_symlink()).unwrap_or(false);
+        if is_owned_config_file_name(&name) {
+            if is_file_or_link {
+                known.push(name);
+            }
         } else {
             unknown.push(name);
         }
@@ -669,7 +675,13 @@ pub fn purge_command(yes: bool) -> Result<(), UserError> {
     for name in &known {
         let _ = std::fs::remove_file(dir.join(name));
     }
-    keychain::keychain_delete();
+    // A purge that cannot confirm the keychain item's deletion must say so:
+    // the session key is the one secret that outlives every file above. A
+    // keys file among the owned names means custody was the file, which
+    // silences the unavailable-service warning.
+    let file_custody = known.iter().any(|name| name == ".env.keys");
+    let result = keychain::keychain_delete();
+    keychain::warn_if_keychain_item_survived(result, file_custody);
     release();
 
     let note = if unknown.is_empty() {
@@ -868,7 +880,7 @@ pub fn search_command(query: &str, regex: bool, limit: usize, all: bool) -> Resu
         .map(|hit| {
             format!(
                 "{}  {}  {}\n  {}",
-                hit.note.uuid,
+                sanitize_uuid(&hit.note.uuid),
                 format_when(hit.note.updated_at),
                 hit.note.title,
                 hit.snippet
@@ -1178,6 +1190,26 @@ mod purge_tests {
         crate::keychain::disable_for_tests();
         let _serial = serial_guard();
         let dir = seeded_dir("unknown");
+        std::fs::write(dir.join("operator-notes.txt"), "mine").unwrap();
+        with_config_dir(dir.to_str().unwrap(), || {
+            purge_command(true).unwrap();
+        });
+        let remaining: Vec<String> = std::fs::read_dir(&dir)
+            .unwrap()
+            .map(|entry| entry.unwrap().file_name().to_string_lossy().to_string())
+            .collect();
+        assert_eq!(remaining, vec!["operator-notes.txt".to_string()]);
+        std::fs::remove_dir_all(&dir).ok();
+    }
+
+    #[test]
+    fn purge_sweeps_crash_orphan_temps_carrying_the_session_scalar() {
+        crate::keychain::disable_for_tests();
+        let _serial = serial_guard();
+        let dir = seeded_dir("orphans");
+        // What write_secret_file leaves behind when a crash interrupts the
+        // atomic rename: a 0600 temp carrying the plaintext session scalar.
+        std::fs::write(dir.join(".env.keys.tmp-4242-orphan"), "plaintext scalar").unwrap();
         std::fs::write(dir.join("operator-notes.txt"), "mine").unwrap();
         with_config_dir(dir.to_str().unwrap(), || {
             purge_command(true).unwrap();
