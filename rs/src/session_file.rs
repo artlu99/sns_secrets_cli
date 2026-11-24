@@ -5,11 +5,8 @@
 //! session wire format, implemented natively (maintainer decision B — no
 //! dotenvx subprocess, no per-machine Node dependency): the TypeScript
 //! CLI, this binary, and the dotenvx CLI all read and write the same file,
-//! pinned byte-for-byte by `tests/fixtures/session-vectors.json`. The
-//! legacy `enc1:` format (written by sns <= 0.5.0) is read only for the
-//! one-shot migration — [`load_session`] falls back to it and re-saves the
-//! file in the dotenvx format under the sync lock. Field names match the
-//! TS layout so the rest of the app reads the same names.
+//! pinned byte-for-byte by `tests/fixtures/session-vectors.json`. Field
+//! names match the TS layout so the rest of the app reads the same names.
 
 use std::collections::HashMap;
 
@@ -19,17 +16,13 @@ use crate::keychain;
 use crate::paths::{keys_path, session_path, set_mode_600, write_secret_file};
 use crate::session::{
     decrypt_value, encrypt_value, generate_keypair, parse_session_file, render_session_file,
-    LegacySessionPrivateKey, ParsedSession, SessionPrivateKey,
+    ParsedSession, SessionPrivateKey,
 };
 use crate::sn_api::SessionSecrets;
 
 /// The dotenvx custody line in `.env.keys` (`src/session-file.ts`
 /// readPrivateKeyFile / writePrivateKeyFile).
 const PRIVATE_KEY_FIELD: &str = "DOTENV_PRIVATE_KEY_SESSION";
-/// The legacy enc1 custody line. Kept deliberately: until migration
-/// replaces `.env.keys`, the line is a live credential the loader must
-/// still find.
-const LEGACY_PRIVATE_KEY_FIELD: &str = "SNS_SESSION_PRIVATE_KEY";
 
 /// One value out of an `.env.keys`-style line, with the TS reader grammar
 /// (`src/session-file.ts` readPrivateKeyFile): `FIELD=` then either a
@@ -60,29 +53,12 @@ fn key_line_value(line: &str, field: &str) -> Option<String> {
     Some(value.to_string())
 }
 
-/// The dotenvx private key from `.env.keys` — the DOTENV line ONLY. The
-/// legacy SNS line is not a custody source for the dotenvx format (TS
-/// parity: the TS reader never saw it either).
+/// The dotenvx private key from `.env.keys` — the DOTENV line only.
 fn read_private_key_file() -> Option<String> {
     let text = std::fs::read_to_string(keys_path()).ok()?;
     for line in text.lines() {
         if let Some(value) = key_line_value(line, PRIVATE_KEY_FIELD) {
             return Some(value);
-        }
-    }
-    None
-}
-
-/// The legacy enc1 private key from its `SNS_SESSION_PRIVATE_KEY` line,
-/// trimmed (legacy files are unquoted). Only the migration reads this.
-fn read_legacy_key_line() -> Option<String> {
-    let text = std::fs::read_to_string(keys_path()).ok()?;
-    for line in text.lines() {
-        if let Some(value) = line.strip_prefix(&format!("{LEGACY_PRIVATE_KEY_FIELD}=")) {
-            let value = value.trim();
-            if !value.is_empty() {
-                return Some(value.to_string());
-            }
         }
     }
     None
@@ -103,9 +79,8 @@ fn write_config_secret(path: &std::path::Path, contents: &str, label: &str) -> R
 
 /// The TS custody file text, byte-for-byte (`src/session-file.ts`
 /// writePrivateKeyFile): one header line, one unquoted value line. This
-/// REPLACES the whole `.env.keys` — any stale legacy SNS line dies here,
-/// which is correct: the line dropped is always the key of a file that no
-/// longer exists.
+/// REPLACES the whole `.env.keys` — the key just written is the key of the
+/// session file just written.
 fn write_private_key_file(key: &str) -> Result<(), UserError> {
     crate::paths::ensure_config_dir()?;
     write_config_secret(
@@ -116,8 +91,7 @@ fn write_private_key_file(key: &str) -> Result<(), UserError> {
 }
 
 /// The session fields as name/value pairs, in the canonical
-/// SESSION_VALUE_KEYS order — built by iterating that constant so this
-/// order and the migration's cannot drift apart.
+/// SESSION_VALUE_KEYS order.
 fn pairs_from_values(values: &HashMap<String, String>) -> Vec<(&'static str, String)> {
     crate::session::SESSION_VALUE_KEYS
         .iter()
@@ -178,11 +152,9 @@ pub fn key_decrypts_session(candidate_hex: &str) -> bool {
 
 /// The per-field dotenvx attempt shared by the trial-decrypt and the load:
 /// validate the scalar, then decrypt every `encrypted:` record; values
-/// without a record prefix pass through, mirroring dotenvx parse; an
-/// `enc1:` value fails the attempt — it is not a dotenvx record, and
-/// silently carrying it through would surface garbage. None on any
-/// failure: wrong key, tampered record, and malformed base64 all look the
-/// same, by construction of GCM.
+/// without a record prefix pass through, mirroring dotenvx parse. None on
+/// any failure: wrong key, tampered record, and malformed base64 all look
+/// the same, by construction of GCM.
 fn try_decrypt_dotenvx(parsed: &ParsedSession, key_hex: &str) -> Option<HashMap<String, String>> {
     let private = SessionPrivateKey::from_hex(key_hex).ok()?;
     let mut values = HashMap::new();
@@ -190,8 +162,6 @@ fn try_decrypt_dotenvx(parsed: &ParsedSession, key_hex: &str) -> Option<HashMap<
         if value.starts_with(crate::session::RECORD_PREFIX) {
             let decrypted = decrypt_value(value, &private, name).ok()?;
             values.insert(name.clone(), decrypted.as_str().to_string());
-        } else if value.starts_with(crate::session::LEGACY_RECORD_PREFIX) {
-            return None;
         } else {
             values.insert(name.clone(), value.clone());
         }
@@ -227,12 +197,11 @@ fn remove_empty_session_file() {
     }
 }
 
-/// Custody settle, shared by save and migration: the OS keychain wins
+/// Custody settle, shared by every save: the OS keychain wins
 /// (`keychain_put` is an upsert); when no secret service accepts the entry,
 /// `.env.keys` (mode 0600) holds the key instead. On the file path the
-/// write REPLACES the whole `.env.keys` — a stale legacy SNS line dies
-/// here, which is correct: the key just written is the key of the session
-/// file just written.
+/// write REPLACES the whole `.env.keys` — the key just written is the key
+/// of the session file just written.
 fn settle_custody(key_hex: &str) -> Result<bool, UserError> {
     if keychain::keychain_put(key_hex) {
         let _ = std::fs::remove_file(keys_path());
@@ -247,21 +216,24 @@ fn settle_custody(key_hex: &str) -> Result<bool, UserError> {
 /// when its private key is recoverable (keychain, then the
 /// `DOTENV_PRIVATE_KEY_SESSION` line in `.env.keys`), a fresh one is
 /// generated otherwise, every field is encrypted to it, and the private
-/// key's custody is settled.
+/// key's custody is settled. The settle ORDER is the crash-safety argument:
+/// a FRESH key is settled into custody BEFORE the session file is written
+/// (stage-before-flip — a crash never leaves a file whose key exists
+/// nowhere), while a REUSED key already lives in custody, so its settle
+/// follows the write as an idempotent re-settle.
 ///
 /// The brick-guard refuses to write over a session no available key opens —
 /// dotenvx (and this writer) encrypt to whatever public key the file
 /// carries and would report success even when nothing can ever decrypt the
 /// result; a stale keychain item (or a lost key) would silently brick the
-/// session while the custody message claims the opposite. An enc1 file
-/// meets none of that: it carries no dotenvx marker, so the guard is
-/// skipped, and a legacy scalar still in the keychain is reused as a
-/// secp256k1 scalar (valid range with probability 1-2^-128) — the file is
-/// overwritten in the dotenvx format to that same hex, consistent and
-/// openable. On a file-custody machine without a DOTENV line a fresh
-/// keypair replaces the legacy one; both shapes stay openable. This only
-/// happens on the login-replaces-unreadable-session path; normal reads
-/// migrate first (load_session). No special case, on purpose.
+/// session while the custody message claims the opposite. The guard is
+/// marker-gated: only a file carrying the `DOTENV_PUBLIC_KEY_SESSION`
+/// header is protected, because only that marker says a dotenvx-format
+/// writer produced it. A file without the header was not written by any
+/// session-format writer this program knows; the documented recovery (the
+/// header-required error in load_session) is logout + login, and a login
+/// that reaches the save replaces the file outright. No special case, on
+/// purpose.
 ///
 /// There is no Rust analogue of the TS bootstrap dance (writePrivateKeyFile
 /// only when a session exists, CI=true, the DOTENV_PRIVATE_KEY_SESSION env
@@ -287,8 +259,18 @@ pub fn save_session(secrets: &SessionSecrets) -> Result<SaveOutcome, UserError> 
             ));
         }
     }
-    let (private, public) = match keychain_key.clone().or_else(|| file_key.clone()) {
+    // The third element says whether custody is already settled: the fresh
+    // keypair branch settles BEFORE the session file is written
+    // (stage-before-flip), the reuse branch settles after it — see the arm
+    // comments.
+    let (private, public, settled) = match keychain_key.clone().or_else(|| file_key.clone()) {
         Some(hex) => {
+            // REUSE — write-then-settle stays safe here: this key was just
+            // read out of live custody (keychain or .env.keys), so a crash
+            // between the write and the re-settle leaves the file and its
+            // key exactly as the previous save left them. There is no
+            // window in which the key exists nowhere.
+            //
             // When the file carries the marker, the guard above already
             // proved this hex opens the session, so from_hex cannot fail
             // there; the map_err is for the no-file / no-marker paths.
@@ -296,9 +278,29 @@ pub fn save_session(secrets: &SessionSecrets) -> Result<SaveOutcome, UserError> 
                 UserError("the stored session key is not a valid secp256k1 scalar — run sns logout".into())
             })?;
             let public = private.public_key();
-            (private, public)
+            (private, public, None)
         }
-        None => generate_keypair(),
+        None => {
+            // FRESH KEYPAIR — stage-before-flip: the new key goes into
+            // custody (keychain upsert, else the .env.keys rewrite) BEFORE
+            // the session file is written. Crash windows:
+            // - settle fails: Err with nothing written, on-disk state
+            //   untouched;
+            // - key settled, crash before the write (key-settled + no
+            //   file): the next save bootstraps harmlessly — custody hands
+            //   back the very key the bootstrap reuses. Any file the login
+            //   was replacing lingers until that next login replaces it —
+            //   data the operator already asked to overwrite, never a live
+            //   session;
+            // - settle + write: done.
+            // The forbidden state — a dotenvx-marked file whose key exists
+            // nowhere, which brick-guards every later save into
+            // logout + login — was the old write-then-settle window and is
+            // unreachable in this order.
+            let (private, public) = generate_keypair();
+            let keychain = settle_custody(&private.to_hex())?;
+            (private, public, Some(keychain))
+        }
     };
 
     let fields: Vec<(&'static str, String)> = pairs(secrets)
@@ -312,7 +314,13 @@ pub fn save_session(secrets: &SessionSecrets) -> Result<SaveOutcome, UserError> 
     let file = render_session_file(&public, &fields);
     write_config_secret(&session_path(), &file, "the session file")?;
 
-    let keychain = settle_custody(&private.to_hex())?;
+    // The fresh key's custody was settled before the flip above; only the
+    // reuse path still owes a settle (an idempotent re-settle — see the
+    // match arms).
+    let keychain = match settled {
+        Some(keychain) => keychain,
+        None => settle_custody(&private.to_hex())?,
+    };
     Ok(SaveOutcome { keychain })
 }
 
@@ -342,25 +350,7 @@ pub fn first_unexpected(names: &[String]) -> Option<String> {
         .cloned()
 }
 
-/// The legacy enc1 attempt: validate the candidate as a P-256 scalar, then
-/// decrypt every `enc1:` record with the field name as associated data
-/// (legacy records ARE name-bound); values without a record prefix pass
-/// through. None on any failure.
-fn try_decrypt_enc1(parsed: &ParsedSession, key_hex: &str) -> Option<HashMap<String, String>> {
-    let private = LegacySessionPrivateKey::from_hex(key_hex).ok()?;
-    let mut values = HashMap::new();
-    for (name, value) in &parsed.fields {
-        if value.starts_with(crate::session::LEGACY_RECORD_PREFIX) {
-            let decrypted = private.decrypt_value(value, name).ok()?;
-            values.insert(name.clone(), decrypted.as_str().to_string());
-        } else {
-            values.insert(name.clone(), value.clone());
-        }
-    }
-    Some(values)
-}
-
-/// The shared tail of both load attempts: the missing-token check, then the
+/// The shared tail of the load attempt: the missing-token check, then the
 /// SessionSecrets. TS's leftover-ciphertext sweep (src/session-file.ts
 /// loadSession) has no separate Rust shape — the attempt that produced
 /// `values` returned Some only when every `encrypted:` record decrypted.
@@ -385,188 +375,47 @@ fn finish_loaded_session(values: HashMap<String, String>) -> Result<Option<Sessi
 
 /// Load and decrypt the session. None when no session file exists.
 ///
-/// dotenvx first, legacy enc1 second. Detection is by marker: a
-/// `DOTENV_PUBLIC_KEY_SESSION` header or `encrypted:` records means the
-/// dotenvx format; an `SNS_SESSION_PUBLIC_KEY` header or `enc1:` records
-/// means legacy enc1. Plaintext files (no markers) pass through, mirroring
-/// dotenvx parse — the missing-token check then fires exactly as TS. Mixed
-/// files try dotenvx, then enc1, and fail closed when neither opens, where
-/// TS's dotenvx parse would silently pass garbled values through.
+/// dotenvx only. The file must carry the `DOTENV_PUBLIC_KEY_SESSION`
+/// header — the marker every dotenvx-format writer prepends. Anything
+/// without it was not written by a session-format writer this program
+/// knows, and the documented recovery is `sns logout`, then `sns login`
+/// (a login also replaces an unreadable session on its own).
 ///
-/// Custody candidates: the keychain, the `.env.keys` DOTENV line, and (for
-/// the legacy attempt) the SNS line, in that order, deduplicated. A
-/// deliberate divergence from TS: a legacy-only file with ONLY the SNS line
-/// present does not hit the missing-custody error, because that state is
-/// the migration entry point. A legacy-only file whose keychain scalar is
-/// the old P-256 key simply fails the dotenvx attempt (the scalar parses as
-/// secp256k1 with probability 1-2^-128 and then decrypts nothing) and is
-/// opened by the enc1 attempt — never an error path, never special-cased.
+/// Custody candidates: the keychain, then the `.env.keys` DOTENV line (the
+/// TS readPrivateKey order). A duplicated candidate is harmless — it just
+/// trial-decrypts twice.
 pub fn load_session() -> Result<Option<SessionSecrets>, UserError> {
     if !session_path().exists() {
         return Ok(None);
     }
     let text = std::fs::read_to_string(session_path()).map_err(|error| UserError(error.to_string()))?;
     let parsed = parse_session_file(&text).map_err(|error| UserError(error.to_string()))?;
+    if parsed.public_key_base64.is_none() {
+        return Err(UserError(
+            ".env.session is not in the dotenvx session format — run `sns logout`, then `sns login`".into(),
+        ));
+    }
     let names: Vec<String> = parsed.fields.iter().map(|(name, _)| name.clone()).collect();
     if let Some(unexpected) = first_unexpected(&names) {
         return Err(UserError(format!("session file contains an unexpected key ({unexpected})")));
     }
 
-    let has_dotenvx = parsed.public_key_base64.is_some()
-        || parsed.fields.iter().any(|(_, value)| value.starts_with(crate::session::RECORD_PREFIX));
-    let has_legacy = parsed.legacy_public_key_base64.is_some()
-        || parsed.fields.iter().any(|(_, value)| value.starts_with(crate::session::LEGACY_RECORD_PREFIX));
-    let legacy_only = has_legacy && !has_dotenvx;
-
     let keychain_key = keychain::keychain_get();
     let dotenv_line = read_private_key_file();
-    let legacy_line = read_legacy_key_line();
-    let dotenv_custody = keychain_key.is_some() || dotenv_line.is_some();
-    if (!legacy_only && !dotenv_custody) || (legacy_only && !dotenv_custody && legacy_line.is_none()) {
+    if keychain_key.is_none() && dotenv_line.is_none() {
         return Err(UserError(
             "session file is encrypted but the dotenvx private key is missing — run sns login".into(),
         ));
     }
 
-    // Attempt 1 — dotenvx, keychain then the DOTENV line (the TS
-    // readPrivateKey order).
-    let mut tried: Vec<&str> = Vec::new();
     for candidate in keychain_key.as_deref().into_iter().chain(dotenv_line.as_deref()) {
-        if tried.contains(&candidate) {
-            continue;
-        }
-        tried.push(candidate);
         if let Some(values) = try_decrypt_dotenvx(&parsed, candidate) {
             return finish_loaded_session(values);
         }
     }
-    if !has_legacy {
-        return Err(UserError(
-            "could not decrypt .env.session — the dotenvx key does not match".into(),
-        ));
-    }
-
-    // Attempt 2 — legacy enc1; the DOTENV line is tried last because it
-    // matters at crash-window C2 (a staged new key while the file still
-    // says enc1 is recovered from the SNS line instead).
-    let mut tried_legacy: Vec<&str> = Vec::new();
-    for candidate in keychain_key
-        .as_deref()
-        .into_iter()
-        .chain(legacy_line.as_deref())
-        .chain(dotenv_line.as_deref())
-    {
-        if tried_legacy.contains(&candidate) {
-            continue;
-        }
-        tried_legacy.push(candidate);
-        if let Some(values) = try_decrypt_enc1(&parsed, candidate) {
-            run_migration(&values);
-            return finish_loaded_session(values);
-        }
-    }
-    // One error shape for "no key opens this session": post-migration the
-    // only format is dotenvx, and the operator instruction (logout + login)
-    // is identical — a legacy-specific message would dead-end now that enc1
-    // encryption is gone.
     Err(UserError(
         "could not decrypt .env.session — the dotenvx key does not match".into(),
     ))
-}
-
-/// One-shot legacy enc1 -> dotenvx migration. Runs only after a successful
-/// enc1 decrypt, under the sync lock (run_migration). The step order IS the
-/// crash-safety argument:
-///
-/// A. generate a fresh secp256k1 keypair;
-/// B. STAGE the new key to `.env.keys` — with the old SNS line carried over
-///    if, and only if, it was already on disk (a keychain secret is never
-///    copied to a file; that would undo what keychain custody is for) —
-///    BEFORE touching the session file;
-/// C. FLIP the session file: re-encrypt all eight values to the new public
-///    key in the dotenvx format;
-/// D. settle custody: the keychain put is an upsert, so the old P-256
-///    scalar in the shared slot (service sn_secrets_cli, account dotenvkey)
-///    is overwritten in place; on success the staged `.env.keys` is
-///    removed, on failure it is replaced with the clean two-line file (the
-///    old key is dead once the file flipped).
-///
-/// Crash windows:
-/// - before B: unchanged enc1 state; a later command retries. Safe.
-/// - C1 after B, before C (staged keys file, session still enc1):
-///   keychain-custody machines still hold the OLD key — the dotenvx attempt
-///   fails and the enc1 attempt recovers via the keychain; file-custody
-///   machines recover the old SNS line from the staged file. Safe.
-/// - C2 after C, before D (file flipped to the new key, custody not settled):
-///   the staged DOTENV line recovers the new key. This is the window that
-///   would brick under any custody-first order (the keychain overwritten
-///   while the file is still enc1) and under any flip-first order without
-///   staging (the file flipped while the new key exists nowhere).
-///   Stage-before-flip is what closes it.
-/// - C3 after D's keychain put, before the removal: the keychain opens; the
-///   two-line file is inert. Safe.
-/// - C4 after settle: fully migrated.
-///
-/// Double-migration race: two processes that both detect enc1 and decrypt
-/// the SAME plaintext are serialized by the sync lock around B-D; the
-/// second runs a FULL migration (fresh keypair, stage, flip, settle) rather
-/// than a delta. Each migration is a complete state transition whose stage
-/// carries the very key its flip encrypts to, so every interleaving
-/// converges to one self-consistent key. Cross-binary (a concurrent TS
-/// save): TS's protectPrivateKey puts whatever hex is in .env.keys —
-/// exactly the key the flip encrypted to — so those interleavings converge
-/// too. Worst case is one redundant extra migration and a superseded
-/// plaintext, never a brick.
-fn migrate_to_dotenvx(values: &HashMap<String, String>) -> Result<(), UserError> {
-    let (private, public) = generate_keypair();
-    // Step B — stage the new key before the flip.
-    let mut staged = format!("# dotenvx private key for .env.session\n{PRIVATE_KEY_FIELD}={}\n", private.to_hex());
-    if let Some(old) = read_legacy_key_line() {
-        staged.push_str(&format!("{LEGACY_PRIVATE_KEY_FIELD}={old}\n"));
-    }
-    crate::paths::ensure_config_dir()?;
-    write_config_secret(&keys_path(), &staged, ".env.keys")?;
-    // Step C — flip the session file to the new public key.
-    let mut fields = Vec::new();
-    for (name, value) in pairs_from_values(values) {
-        let record = encrypt_value(&value, &public, name)
-            .map_err(|_| UserError(format!("could not encrypt {name}")))?;
-        fields.push((name, record));
-    }
-    let file = render_session_file(&public, &fields);
-    write_config_secret(&session_path(), &file, "the session file")?;
-    // Step D — settle custody (keychain upsert over the old scalar, or the
-    // clean file on a no-service machine).
-    settle_custody(&private.to_hex())?;
-    Ok(())
-}
-
-/// The sync lock around the migration. No load_session call site runs under
-/// the lock today (logout and sync acquire it AFTER their load_session
-/// calls), so this cannot self-deadlock. On lock timeout the migration is
-/// skipped with a note and the read proceeds — a read command stuck behind
-/// a long sync still works, and the migration retries on the next command.
-fn run_migration(values: &HashMap<String, String>) {
-    let result = match crate::lock::acquire_sync_lock(30_000) {
-        Ok(release) => {
-            let result = migrate_to_dotenvx(values);
-            release();
-            result
-        }
-        Err(error) => Err(error),
-    };
-    // Custody-relevant event (keychain slot contents change, .env.keys is
-    // rewritten or removed): one line on stderr, stdout stays
-    // machine-readable — logout/purge warnings set the precedent. A failed
-    // migration is never fatal to the load: the plaintext is already in
-    // hand, every crash state above is recoverable, and a later command
-    // retries.
-    match result {
-        Ok(()) => eprintln!("migrated the legacy enc1 session file to the dotenvx format"),
-        Err(error) => eprintln!(
-            "note: the legacy session file was left in place — migration will retry on the next command ({error})"
-        ),
-    }
 }
 
 /// Delete the session file, the keys file, and the keychain entry.
@@ -604,11 +453,9 @@ mod tests {
     use std::collections::BTreeMap;
 
     // Every test here runs with keychain::disable_for_tests() (file custody;
-    // keychain_put and secret_service_available become no-ops, so the real
-    // keychain is never touched) inside with_config_dir over a fresh /tmp
-    // dir. Caveat shared with the purge tests: keychain_get bypasses the
-    // disable flag, which is fine on this box — secret-tool is absent, so
-    // the lookup deterministically returns None.
+    // get, put, delete, and the availability probe all become no-ops, so the
+    // real keychain is never touched on any machine — with or without a live
+    // secret service) inside with_config_dir over a fresh /tmp dir.
 
     // Serialized: the global config override has one slot, and concurrent
     // tests would otherwise resolve into each other's config dirs. The lock
@@ -630,7 +477,7 @@ mod tests {
 
     fn test_secrets() -> SessionSecrets {
         SessionSecrets {
-            account_email: "mig-test@example.test".into(),
+            account_email: "session-test@example.test".into(),
             refresh_token: "refresh-token".into(),
             access_token: "access-token".into(),
             access_expiration_ms: 1_800_000_000_000,
@@ -661,19 +508,6 @@ mod tests {
         session_file: String,
         #[serde(rename = "keysFile")]
         keys_file: String,
-    }
-
-    // -- Legacy enc1 fixture (captured from the enc1-era code) --------------
-
-    const LEGACY_SESSION: &str = include_str!("../tests/fixtures/legacy-enc1/.env.session");
-    const LEGACY_KEYS: &str = include_str!("../tests/fixtures/legacy-enc1/.env.keys");
-
-    fn legacy_key_line() -> String {
-        LEGACY_KEYS
-            .lines()
-            .find_map(|line| line.strip_prefix("SNS_SESSION_PRIVATE_KEY="))
-            .expect("fixture carries the SNS custody line")
-            .to_string()
     }
 
     #[test]
@@ -898,97 +732,68 @@ mod tests {
         let _ = std::fs::remove_dir_all(&dir);
     }
 
+    /// The header is the format gate: a session-shaped file without the
+    /// dotenvx header was not written by any session-format writer, and the
+    /// load error names the documented recovery verbatim.
     #[test]
-    fn load_session_migrates_the_legacy_enc1_fixture() {
+    fn a_file_without_the_dotenvx_header_fails_load_naming_the_recovery() {
         crate::keychain::disable_for_tests();
         let _serial = serial_guard();
-        let dir = fresh_dir("migrate");
+        let dir = fresh_dir("no-header");
         crate::paths::with_config_dir(&dir, || {
             crate::paths::ensure_config_dir().expect("config dir creates");
-            std::fs::write(session_path(), LEGACY_SESSION).expect("legacy session seeded");
-            std::fs::write(keys_path(), LEGACY_KEYS).expect("legacy keys seeded");
+            // Session-shaped plaintext: every name inside the contract, no
+            // header, no encrypted records.
+            let plaintext = crate::session::SESSION_VALUE_KEYS
+                .iter()
+                .map(|name| format!("{name}=plaintext-value\n"))
+                .collect::<String>();
+            std::fs::write(session_path(), &plaintext).expect("headerless session written");
 
-            let loaded = load_session().expect("migration load succeeds").expect("some session");
-            assert!(is_64_hex(&loaded.db_key), "db key is 64 hex");
-            assert!(!loaded.refresh_token.is_empty(), "refresh token present");
-
-            let session = std::fs::read_to_string(session_path()).expect("session reads");
-            assert!(session.contains("DOTENV_PUBLIC_KEY_SESSION="), "migrated header present");
-            assert!(!session.contains("enc1:"), "no legacy records remain");
-            let keys = std::fs::read_to_string(keys_path()).expect("keys reads");
-            assert!(keys.contains("DOTENV_PRIVATE_KEY_SESSION="), "dotenvx custody present");
-            assert!(!keys.contains("SNS_SESSION_PRIVATE_KEY="), "legacy custody line gone");
-
-            let again = load_session().expect("second load").expect("some session");
-            assert_eq!(pairs(&again), pairs(&loaded), "stable — no re-migration");
-        });
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn migration_recovers_from_a_staged_keys_file_crash() {
-        crate::keychain::disable_for_tests();
-        let _serial = serial_guard();
-        let dir = fresh_dir("crash-windows");
-        crate::paths::with_config_dir(&dir, || {
-            crate::paths::ensure_config_dir().expect("config dir creates");
-
-            // C1: the staged keys file exists, the session file is still enc1.
-            std::fs::write(session_path(), LEGACY_SESSION).expect("legacy session seeded");
-            let staged = format!(
-                "# dotenvx private key for .env.session\nDOTENV_PRIVATE_KEY_SESSION={}\nSNS_SESSION_PRIVATE_KEY={}\n",
-                generate_keypair().0.to_hex(),
-                legacy_key_line()
+            let error = load_session().expect_err("a headerless file is not a session");
+            assert!(
+                error.0.contains(".env.session is not in the dotenvx session format"),
+                "got: {error}"
             );
-            std::fs::write(keys_path(), staged).expect("staged keys written");
-            let c1 = load_session().expect("C1 recovers via the enc1 attempt").expect("some session");
-            assert_eq!(c1.db_key, "ab".repeat(32), "the legacy plaintext came through");
-
-            // C2: the session file is already flipped to a fresh key K and
-            // .env.keys holds only K — the dotenvx attempt recovers it.
-            let (private, public) = generate_keypair();
-            let fields: Vec<(&'static str, String)> = pairs(&test_secrets())
-                .into_iter()
-                .map(|(name, value)| {
-                    let record = encrypt_value(&value, &public, name).expect("field encrypts");
-                    (name, record)
-                })
-                .collect();
-            std::fs::write(session_path(), render_session_file(&public, &fields))
-                .expect("flipped session written");
-            std::fs::write(
-                keys_path(),
-                format!("# dotenvx private key for .env.session\nDOTENV_PRIVATE_KEY_SESSION={}\n", private.to_hex()),
-            )
-            .expect("staged new key written");
-            let c2 = load_session().expect("C2 recovers via the dotenvx attempt").expect("some session");
-            assert_eq!(pairs(&c2), pairs(&test_secrets()), "the staged key opens the flipped file");
-        });
-        let _ = std::fs::remove_dir_all(&dir);
-    }
-
-    #[test]
-    fn migration_failure_leaves_the_legacy_file_in_place() {
-        crate::keychain::disable_for_tests();
-        let _serial = serial_guard();
-        let dir = fresh_dir("migrate-fail");
-        crate::paths::with_config_dir(&dir, || {
-            crate::paths::ensure_config_dir().expect("config dir creates");
-            std::fs::write(session_path(), LEGACY_SESSION).expect("legacy session seeded");
-            std::fs::write(
-                keys_path(),
-                format!("# dotenvx private key for .env.session\nDOTENV_PRIVATE_KEY_SESSION={}\n", "ee".repeat(32)),
-            )
-            .expect("unrelated custody written");
-
-            let error = load_session().expect_err("no key opens the fixture");
+            assert!(error.0.contains("run `sns logout`, then `sns login`"), "got: {error}");
             assert_eq!(
-                error.0,
-                "could not decrypt .env.session — the dotenvx key does not match"
+                std::fs::read_to_string(session_path()).expect("session reads"),
+                plaintext,
+                "the failed load leaves the file byte-identical"
             );
-            let session = std::fs::read_to_string(session_path()).expect("session reads");
-            assert!(session.contains("enc1:"), "legacy records untouched");
-            assert!(!session.contains("DOTENV_PUBLIC_KEY_SESSION="), "no header written");
+        });
+        let _ = std::fs::remove_dir_all(&dir);
+    }
+
+    // -- Stage-before-flip on the fresh-keypair bootstrap (save_session) -----
+
+    #[test]
+    fn a_failed_custody_settle_on_the_fresh_path_writes_no_session_file() {
+        crate::keychain::disable_for_tests();
+        let _serial = serial_guard();
+        let dir = fresh_dir("settle-fail");
+        crate::paths::with_config_dir(&dir, || {
+            crate::paths::ensure_config_dir().expect("config dir creates");
+            // `.env.keys` as a directory: the custody write fails
+            // deterministically (rename onto a directory), standing in for
+            // an unwritable disk on this no-keychain test machine.
+            std::fs::create_dir_all(keys_path()).expect(".env.keys blocker created");
+
+            let error = save_session(&test_secrets()).expect_err("the custody write fails");
+            assert!(error.0.contains("could not write .env.keys"), "got: {error}");
+            assert!(
+                !session_path().exists(),
+                "stage-before-flip: a failed settle writes no session file"
+            );
+
+            // Clear the obstruction: the "key settled, no file" window the
+            // reorder leaves behind never wedges the next save — it
+            // bootstraps against the (now recovered) custody like any
+            // fresh login.
+            std::fs::remove_dir_all(keys_path()).expect("blocker removed");
+            save_session(&test_secrets()).expect("the next save bootstraps harmlessly");
+            let loaded = load_session().expect("loads").expect("some session");
+            assert_eq!(pairs(&loaded), pairs(&test_secrets()), "round trip");
         });
         let _ = std::fs::remove_dir_all(&dir);
     }

@@ -60,16 +60,19 @@ export async function keychainGet(): Promise<string | null> {
 export async function keychainPut(secret: string): Promise<boolean> {
   if (!(await secretServiceAvailable())) return false;
   if (process.platform === "darwin") {
-    const result = await run("security", [
-      "add-generic-password",
-      "-U",
-      "-s",
-      SERVICE,
-      "-a",
-      ACCOUNT,
-      "-w",
-      secret,
-    ]);
+    // The key must not sit in an argument list: `security -i` is the tool's
+    // documented interactive mode — it reads commands from stdin (the prompt
+    // appears only on a tty; exit status is the status of the last command),
+    // so the secret transits one anonymous pipe instead of argv, where every
+    // same-user process could read it. The line is argv-tokenized by the
+    // tool's own quoting rules; SERVICE/ACCOUNT and the 64-hex key need no
+    // quoting, and -v must never be added (verbose echoes every argument,
+    // including the -w value, to stderr).
+    const result = await run(
+      "security",
+      ["-i"],
+      `add-generic-password -U -s ${SERVICE} -a ${ACCOUNT} -w ${secret}\n`,
+    );
     return result.code === 0;
   }
   const result = await run(

@@ -18,27 +18,20 @@
 //!
 //! Each record is `encrypted:` + standard padded base64 of
 //! `ephemeral_public(65, uncompressed) || iv(16) || auth_tag(16) ||
-//! ciphertext`. The scheme is ECIES over secp256k1 — NOT P-256; the legacy
-//! enc1 header comment claiming prime256v1 parity with dotenvx was wrong and
-//! is corrected here. Concretely: the ephemeral key is an uncompressed 65-byte
-//! public point; the ECDH shared point enters the key derivation uncompressed
-//! (65 bytes) while the peer key feeds the scalar multiplication compressed;
-//! the shared key is HKDF-SHA256 with a 32-zero-byte salt and empty info; and
-//! AES-256-GCM runs with a 16-byte IV and NO associated data, tag stored
-//! between the IV and the ciphertext.
+//! ciphertext`. The scheme is ECIES over secp256k1: the ephemeral key is an
+//! uncompressed 65-byte public point; the ECDH shared point enters the key
+//! derivation uncompressed (65 bytes) while the peer key feeds the scalar
+//! multiplication compressed; the shared key is HKDF-SHA256 with a
+//! 32-zero-byte salt and empty info; and AES-256-GCM runs with a 16-byte IV
+//! and NO associated data, tag stored between the IV and the ciphertext.
 //!
 //! The absence of associated data is load-bearing for compatibility: a record
 //! is not bound to its field name and decrypts identically under any name
-//! (disclosed in SECURITY.md; the legacy enc1 format did bind the name).
+//! (disclosed in SECURITY.md).
 //!
 //! The private half is a 32-byte hex secp256k1 scalar in `.env.keys`
 //! (`DOTENV_PRIVATE_KEY_SESSION`) or the OS keychain (shared slot with the TS
 //! CLI). Wrong key and tampering are the same error, by construction of GCM.
-//!
-//! The legacy `enc1:` format (P-256, field name as associated data) is
-//! decrypt-only here — [`LegacySessionPrivateKey`] — so the one-shot
-//! migration can open old sessions and re-encrypt them into this format.
-//! Producing new enc1 records is gone.
 
 use aes_gcm::aead::array::Array;
 use aes_gcm::aead::{Aead, KeyInit, consts::U16};
@@ -95,11 +88,6 @@ pub const SESSION_VALUE_KEYS: [&str; 8] = [
 pub const PUBLIC_KEY_FIELD: &str = "DOTENV_PUBLIC_KEY_SESSION";
 /// The record prefix framing every encrypted value.
 pub const RECORD_PREFIX: &str = "encrypted:";
-/// The legacy enc1 record prefix; a value starting with it marks a session
-/// file that still needs the one-shot migration.
-pub const LEGACY_RECORD_PREFIX: &str = "enc1:";
-/// The legacy enc1 public-key header line (`SNS_SESSION_PUBLIC_KEY`).
-pub const LEGACY_PUBLIC_KEY_FIELD: &str = "SNS_SESSION_PUBLIC_KEY";
 
 /// Exact bytes of the `DOTENV_PUBLIC_KEY` banner dotenvx prepends above the
 /// public-key line (pinned from @dotenvx/dotenvx's `prependPublicKey` helper;
@@ -158,22 +146,6 @@ impl SessionPublicKey {
     pub fn from_hex(hex_str: &str) -> Result<Self, SessionError> {
         let raw = hex::decode(hex_str).map_err(|_| SessionError::InvalidPublicKey)?;
         let point = PublicKey::from_sec1_bytes(&raw).map_err(|_| SessionError::InvalidPublicKey)?;
-        Ok(Self(point.to_sec1_point(true).as_bytes().try_into().expect("compressed point is 33 bytes")))
-    }
-
-    /// Historical constructor name: either era's public-key encoding still
-    /// validates — dotenvx hex (66/130 chars) first, the legacy enc1 base64
-    /// encoding (33-byte SEC1 point) underneath — so a hand-edited file from
-    /// either age is judged on its bytes. The custody flow itself never
-    /// requires a header (session_file.rs loads by trial decryption). A
-    /// point not on secp256k1 — which every real P-256 key is — is rejected.
-    pub fn from_base64(encoded: &str) -> Result<Self, SessionError> {
-        if let Ok(key) = Self::from_hex(encoded) {
-            return Ok(key);
-        }
-        let raw = BASE64.decode(encoded).map_err(|_| SessionError::InvalidPublicKey)?;
-        let bytes: [u8; 33] = raw.try_into().map_err(|_| SessionError::InvalidPublicKey)?;
-        let point = PublicKey::from_sec1_bytes(&bytes).map_err(|_| SessionError::InvalidPublicKey)?;
         Ok(Self(point.to_sec1_point(true).as_bytes().try_into().expect("compressed point is 33 bytes")))
     }
 
@@ -328,10 +300,6 @@ pub struct ParsedSession {
     /// The armored public key from the file's `DOTENV_PUBLIC_KEY_SESSION`
     /// line (bare hex — quotes stripped by the parser).
     pub public_key_base64: Option<String>,
-    /// The armored public key from a legacy `SNS_SESSION_PUBLIC_KEY` line,
-    /// lifted so the migration can recognize an old file before the
-    /// field-name contract rejects it.
-    pub legacy_public_key_base64: Option<String>,
     pub fields: Vec<(String, String)>,
 }
 
@@ -345,7 +313,6 @@ pub struct ParsedSession {
 pub fn parse_session_file(text: &str) -> Result<ParsedSession, SessionError> {
     let mut parsed = ParsedSession {
         public_key_base64: None,
-        legacy_public_key_base64: None,
         fields: Vec::new(),
     };
     for line in text.replace("\r\n", "\n").lines() {
@@ -367,8 +334,6 @@ pub fn parse_session_file(text: &str) -> Result<ParsedSession, SessionError> {
         let value = parse_value(raw_value)?;
         if name == PUBLIC_KEY_FIELD {
             parsed.public_key_base64 = Some(value);
-        } else if name == LEGACY_PUBLIC_KEY_FIELD {
-            parsed.legacy_public_key_base64 = Some(value);
         } else if let Some(existing) = parsed.fields.iter_mut().find(|(key, _)| key == name) {
             existing.1 = value;
         } else {
@@ -418,70 +383,6 @@ fn parse_value(raw: &str) -> Result<String, SessionError> {
         None => raw.trim_end(),
     };
     Ok(unquoted.to_string())
-}
-
-// ---------------------------------------------------------------------------
-// Legacy enc1 records (P-256) — DECRYPT ONLY, for the one-shot migration.
-// Record layout: `enc1:` + base64(ephemeral_public(33, compressed) ||
-// nonce(12) || ciphertext || tag(16)); P-256 ECDH, HKDF-SHA256 with the
-// ephemeral public key as salt and `sns/session/v1` as info, AES-256-GCM with
-// a 12-byte nonce and the FIELD NAME as associated data. Encrypting in this
-// format is gone on purpose — every writer now emits the dotenvx format.
-// ---------------------------------------------------------------------------
-
-const LEGACY_HKDF_INFO: &[u8] = b"sns/session/v1";
-const LEGACY_EPHEMERAL_PUBLIC_BYTES: usize = 33;
-const LEGACY_NONCE_BYTES: usize = 12;
-const LEGACY_RECORD_OVERHEAD: usize = LEGACY_EPHEMERAL_PUBLIC_BYTES + LEGACY_NONCE_BYTES + TAG_BYTES;
-
-/// A P-256 session scalar from the enc1 era, held zeroized. Decrypt-only.
-#[derive(PartialEq, Eq)]
-pub struct LegacySessionPrivateKey(Zeroizing<[u8; 32]>);
-
-impl LegacySessionPrivateKey {
-    pub fn from_hex(hex_str: &str) -> Result<Self, SessionError> {
-        let raw = hex::decode(hex_str).map_err(|_| SessionError::InvalidPrivateKey)?;
-        let bytes: [u8; 32] = raw.try_into().map_err(|_| SessionError::InvalidPrivateKey)?;
-        p256::SecretKey::from_slice(&bytes).map_err(|_| SessionError::InvalidPrivateKey)?;
-        Ok(Self(Zeroizing::new(bytes)))
-    }
-
-    /// Decrypt one legacy `enc1:` record. The field name IS authenticated
-    /// here — legacy records cannot be moved between names.
-    pub fn decrypt_value(&self, record: &str, field: &str) -> Result<Zeroizing<String>, SessionError> {
-        let encoded = record.strip_prefix(LEGACY_RECORD_PREFIX).ok_or(SessionError::NotARecord)?;
-        let raw = BASE64.decode(encoded).map_err(|_| SessionError::MalformedRecord)?;
-        if raw.len() < LEGACY_RECORD_OVERHEAD {
-            return Err(SessionError::MalformedRecord);
-        }
-        let (ephemeral_public, rest) = raw.split_at(LEGACY_EPHEMERAL_PUBLIC_BYTES);
-        let peer_public =
-            p256::PublicKey::from_sec1_bytes(ephemeral_public).map_err(|_| SessionError::MalformedRecord)?;
-        let key = p256::SecretKey::from_slice(&self.0[..]).map_err(|_| SessionError::InvalidPrivateKey)?;
-        let shared = p256::ecdh::diffie_hellman(key.to_nonzero_scalar(), peer_public.as_affine());
-        let hk = Hkdf::<Sha256>::new(Some(ephemeral_public), shared.raw_secret_bytes());
-        let mut okm = Zeroizing::new([0u8; 32]);
-        hk.expand(LEGACY_HKDF_INFO, &mut *okm).expect("32 bytes is a valid HKDF output length");
-
-        let nonce: [u8; LEGACY_NONCE_BYTES] =
-            rest[..LEGACY_NONCE_BYTES].try_into().expect("split at fixed bounds");
-        let ciphertext = &rest[LEGACY_NONCE_BYTES..];
-        let plaintext = aes_gcm::Aes256Gcm::new(&Array::from(*okm))
-            .decrypt(
-                &Array::from(nonce),
-                aes_gcm::aead::Payload { msg: ciphertext, aad: field.as_bytes() },
-            )
-            .map_err(|_| SessionError::KeyMismatch)?;
-        Ok(Zeroizing::new(
-            String::from_utf8(plaintext).map_err(|_| SessionError::Crypto("decrypted value is not utf-8".into()))?,
-        ))
-    }
-}
-
-impl core::fmt::Debug for LegacySessionPrivateKey {
-    fn fmt(&self, f: &mut core::fmt::Formatter<'_>) -> core::fmt::Result {
-        f.write_str("LegacySessionPrivateKey([redacted])")
-    }
 }
 
 #[cfg(test)]
@@ -645,7 +546,6 @@ mod tests {
 
         let parsed = parse_session_file(&case.session_file).expect("golden file parses");
         assert_eq!(parsed.public_key_base64.as_deref(), Some(case.public_key_hex.as_str()));
-        assert!(parsed.legacy_public_key_base64.is_none(), "no legacy header in a fresh file");
         let names: Vec<&str> = parsed.fields.iter().map(|(name, _)| name.as_str()).collect();
         assert_eq!(names.len(), SESSION_VALUE_KEYS.len(), "all 8 canonical fields");
         for (expected, actual) in case.record_inputs.iter().zip(names.iter()) {
@@ -816,8 +716,7 @@ mod tests {
     /// THE DISCLOSED WEAKNESS, asserted so it can never regress silently:
     /// the dotenvx wire format carries no associated data, so a record
     /// decrypts under ANY field name. SECURITY.md documents this as the
-    /// accepted cost of dotenvx compatibility; the legacy enc1 format bound
-    /// the field name and rejected such swaps (asserted further below).
+    /// accepted cost of dotenvx compatibility.
     #[test]
     fn records_are_not_bound_to_field_names_in_this_format() {
         let (private, public) = generate_keypair();
@@ -828,40 +727,6 @@ mod tests {
         );
         let swapped = decrypt_value(&record, &private, "SN_REFRESH_TOKEN").expect("SWAPPED NAME STILL DECRYPTS");
         assert_eq!(swapped.as_str(), "top secret");
-    }
-
-    // -- Legacy enc1 (decrypt-only) -----------------------------------------
-
-    /// Independent known-answer vector for the legacy format, computed with
-    /// node:crypto in Bun (createECDH prime256v1 + hkdfSync + aes-256-gcm) at
-    /// the enc1-era commit 365d2f4 — NOT by this module. Migration must keep
-    /// opening records like this one.
-    const LEGACY_KAT_KEY_HEX: &str = concat!("aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa", "aaaaaaaaaaaaaaaaaaaaaaaaaaaaaaaa");
-    const LEGACY_KAT_PUBLIC_B64: &str = "AjgBTGA8idqXEkJjIO5TqUx5Xdo7kLtbB5Guj120hrfb";
-    const LEGACY_KAT_RECORD: &str = "enc1:AnYKBshY3BflxTbegR9xB7+iTU/uOdZK/ZFY7rqrPPJbAAECAwQFBgcICQoLHNs2JZe7dVwNHAHp5tHFvWAafUco0u5V/O7FGoP2MLDu9vuK7hWzBQoz3Se/ZSh49FNvcreAkNrMjl/q9odCaTcTDEPk0fXKOGEvFTNqwuc=";
-
-    #[test]
-    fn legacy_enc1_vectors_still_decrypt() {
-        let key = LegacySessionPrivateKey::from_hex(LEGACY_KAT_KEY_HEX).expect("kat key");
-        // The scalar's compressed P-256 point matches the vector's header key
-        // (test-side derivation; the module exposes no legacy public API).
-        let secret = p256::SecretKey::from_slice(&hex::decode(LEGACY_KAT_KEY_HEX).expect("hex")).expect("scalar");
-        use p256::elliptic_curve::sec1::ToSec1Point as LegacyPoint;
-        let point = LegacyPoint::to_sec1_point(&secret.public_key(), true);
-        assert_eq!(BASE64.encode(point.as_bytes()), LEGACY_KAT_PUBLIC_B64, "scalar and header point agree");
-
-        let plaintext = Zeroizing::new("ab".repeat(32));
-        assert_eq!(key.decrypt_value(LEGACY_KAT_RECORD, "SN_DB_KEY").expect("kat decrypts"), plaintext);
-        // The legacy format DID bind the field name:
-        assert_eq!(key.decrypt_value(LEGACY_KAT_RECORD, "SN_REFRESH_TOKEN"), Err(SessionError::KeyMismatch));
-        // Wrong key, tamper, and non-record all fail closed:
-        let wrong = LegacySessionPrivateKey::from_hex(&"bb".repeat(32)).expect("other scalar");
-        assert_eq!(wrong.decrypt_value(LEGACY_KAT_RECORD, "SN_DB_KEY"), Err(SessionError::KeyMismatch));
-        let mut tampered = LEGACY_KAT_RECORD.to_string();
-        let flip = tampered.len() - 2;
-        tampered.replace_range(flip..flip + 1, if tampered.as_bytes()[flip] == b'A' { "B" } else { "A" });
-        assert_eq!(key.decrypt_value(&tampered, "SN_DB_KEY"), Err(SessionError::KeyMismatch));
-        assert_eq!(key.decrypt_value("junk", "SN_DB_KEY"), Err(SessionError::NotARecord));
     }
 
     // -- Parser contract ----------------------------------------------------
@@ -916,8 +781,7 @@ mod tests {
     fn public_keys_are_validated_on_decode() {
         let (_, public) = generate_keypair();
         assert_eq!(SessionPublicKey::from_hex(&public.to_hex()).expect("hex round trips"), public);
-        assert_eq!(SessionPublicKey::from_base64(&public.to_hex()).expect("base64 name accepts hex"), public);
-        assert!(SessionPublicKey::from_base64(&BASE64.encode([0u8; 33])).is_err(), "identity point is not on the curve");
+        assert!(SessionPublicKey::from_hex(&"00".repeat(66)).is_err(), "identity point is not on the curve");
         assert!(SessionPublicKey::from_hex("junk").is_err());
         assert!(SessionPublicKey::from_hex(&"ff".repeat(66)).is_err(), "over-length hex is not a point");
         assert!(
@@ -932,9 +796,6 @@ mod tests {
         assert_eq!(format!("{private:?}"), "SessionPrivateKey([redacted])");
         assert_eq!(SessionPrivateKey::from_hex(&private.to_hex()).expect("hex round trips").to_hex(), private.to_hex());
         assert_eq!(SessionPrivateKey::from_hex("abcd"), Err(SessionError::InvalidPrivateKey));
-        let legacy = LegacySessionPrivateKey::from_hex(&"bb".repeat(32)).expect("legacy key");
-        assert_eq!(format!("{legacy:?}"), "LegacySessionPrivateKey([redacted])");
-        assert_eq!(LegacySessionPrivateKey::from_hex("zz"), Err(SessionError::InvalidPrivateKey));
     }
 
     #[test]
@@ -947,6 +808,5 @@ mod tests {
             Err(SessionError::InvalidPrivateKey),
             "any scalar at or above the curve order refuses"
         );
-        assert_eq!(LegacySessionPrivateKey::from_hex(&"00".repeat(32)), Err(SessionError::InvalidPrivateKey));
     }
 }

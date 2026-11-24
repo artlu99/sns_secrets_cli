@@ -22,7 +22,6 @@ const PUBLIC_SN_ENV = new Set(["SN_EMAIL", "SN_API_URL"]);
 /** True when a process environment name carries credential material. */
 export function isSecretEnvName(name: string): boolean {
   if (name === "DOTENV_KEY" || name.startsWith("DOTENV_PRIVATE_KEY")) return true;
-  if (name === "SNS_SESSION_PRIVATE_KEY") return true;
   if (name.startsWith("SN_") && !PUBLIC_SN_ENV.has(name)) return true;
   return false;
 }

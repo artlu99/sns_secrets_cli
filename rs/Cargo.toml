@@ -18,7 +18,6 @@ indexmap = "2.14.2"
 k256 = { version = "0.14.0", features = ["ecdh"] }
 jiff = "0.2.43"
 libc = "0.2.191"
-p256 = { version = "0.14.0", features = ["ecdh"] }
 regex = "1.13.1"
 reqwest = { version = "0.12.28", default-features = false, features = ["blocking", "rustls-tls-webpki-roots-no-provider"] }
 rpassword = "7.5.5"
@@ -30,6 +29,14 @@ sha2 = "0.11.1"
 terminal_size = "0.4.4"
 url = "2.5.8"
 zeroize = "1.9.1"
+
+# macOS custody transport (rs/src/keychain.rs): SecItem spoken in-process,
+# so no subprocess ever carries the session key. The -sys crate is a direct
+# dependency because errSecItemNotFound is not re-exported by the wrapper.
+# Target-gated: Linux never compiles or links either crate.
+[target.'cfg(target_os = "macos")'.dependencies]
+security-framework = { version = "3.7", default-features = false }
+security-framework-sys = { version = "2.17", default-features = false }
 
 # The bundled libsqlite3-sys amalgamation is swapped for SQLite3 Multiple
 # Ciphers (the upstream of better-sqlite3-multiple-ciphers), so the cache

@@ -31,21 +31,18 @@ test("secret names are removed before a child process", () => {
   expect(env.PATH).toBe("/usr/bin");
 });
 
-test("child env also drops SNS_SESSION_PRIVATE_KEY and every SNS_ knob", () => {
+test("child env drops the whole SNS_ knob namespace", () => {
   const env = scrubbedEnv({
     PATH: "/usr/bin",
-    SNS_SESSION_PRIVATE_KEY: "secret",
     SNS_CONFIG_DIR: "/tmp/cfg",
     SNS_DEBUG: "1",
     HOME: "/tmp",
   });
-  expect(env.SNS_SESSION_PRIVATE_KEY).toBeUndefined();
   expect(env.SNS_CONFIG_DIR).toBeUndefined();
   expect(env.SNS_DEBUG).toBeUndefined();
   expect(env.PATH).toBe("/usr/bin");
-  // The launch scrub drops the secret-named key too, but keeps sns's own
-  // runtime knobs — the running program still reads them.
-  expect(isSecretEnvName("SNS_SESSION_PRIVATE_KEY")).toBe(true);
+  // The launch scrub keeps sns's own runtime knobs — the running program
+  // still reads them; only children lose them.
   expect(isSecretEnvName("SNS_CONFIG_DIR")).toBe(false);
 });
 

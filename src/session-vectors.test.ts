@@ -107,9 +107,9 @@ test("a golden record decrypts under any field name — the format binds no asso
   // THE DISCLOSED WEAKNESS, pinned on the TS side exactly as the Rust side
   // pins it (`records_are_not_bound_to_field_names_in_this_format`): dotenvx
   // records carry no AAD, so a record moved between field names still
-  // decrypts. SECURITY.md discloses this; the legacy enc1 format did bind
-  // the name. Structural guards remain: the loader rejects any key outside
-  // the session contract, and the server validates every credential.
+  // decrypts. SECURITY.md discloses this. Structural guards remain: the
+  // loader rejects any key outside the session contract, and the server
+  // validates every credential.
   const recordCase = vectors.recordCases.find((entry) => entry.name === "cookie-shaped") ?? vectors.recordCases[0]!;
   const swapped = quietly(() =>
     parse(recordWrapper(recordCase.publicKeyHex, "SN_REFRESH_TOKEN", recordCase.value), {

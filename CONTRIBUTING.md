@@ -96,6 +96,8 @@ Before merging CLI or extension work that touches secrets, session, cache, or cr
 - Values never print on inventory paths; only copy / one-key clipboard flows expose a value.
 - `.env.session`, `.env.keys`, and `*.db` stay gitignored.
 - `bun check` / relevant surface checks pass.
+- `bun run spec:verify` passes — the dotenvx wire oracle (1,122 byte-level checks in `scripts/session-spec-reference.ts` against the installed library).
+- `@dotenvx/dotenvx` stays pinned exact in `package.json`; bumping it means regenerating the session vectors (`bun scripts/session-spec-reference.ts --gen-fixtures`) and re-running `bun run test:rust`.
 
 v1 stays read-mostly: sync / list / search / show / copy / browse. No writes to Standard Notes and no Files API.
 

@@ -15,12 +15,6 @@ pub fn is_secret_env_name(name: &str) -> bool {
     if name == "DOTENV_KEY" || name.starts_with("DOTENV_PRIVATE_KEY") {
         return true;
     }
-    // Kept deliberately: until the one-shot migration replaces .env.keys,
-    // the legacy SNS_SESSION_PRIVATE_KEY line is a live credential, and an
-    // exported copy of the environment must stay scrubbed.
-    if name == "SNS_SESSION_PRIVATE_KEY" {
-        return true;
-    }
     name.starts_with("SN_") && !PUBLIC_SN_ENV.contains(&name)
 }
 
@@ -171,7 +165,6 @@ mod tests {
             "SN_PASSWORD",
             "DOTENV_KEY",
             "DOTENV_PRIVATE_KEY_SESSION",
-            "SNS_SESSION_PRIVATE_KEY",
         ] {
             assert!(is_secret_env_name(name), "{name} is a secret name");
         }
@@ -182,16 +175,15 @@ mod tests {
         }
     }
 
-    /// The child map drops the whole reserved `SNS_` namespace — the session
-    /// private key included — even though the launch scrub must keep the
-    /// knobs (`SNS_CONFIG_DIR` is read by this process, never handed on).
+    /// The child map drops the whole reserved `SNS_` namespace even though
+    /// the launch scrub must keep the knobs (`SNS_CONFIG_DIR` is read by
+    /// this process, never handed on).
     #[test]
     fn the_child_environment_drops_the_whole_sns_namespace() {
         let mut base: HashMap<String, String> = HashMap::new();
         base.insert("PATH".into(), "/usr/bin".into());
         base.insert("SN_EMAIL".into(), "me@example.test".into());
         base.insert("SNS_CONFIG_DIR".into(), "/tmp/somewhere".into());
-        base.insert("SNS_SESSION_PRIVATE_KEY".into(), "64-hex-not-real".into());
         base.insert("SN_DB_KEY".into(), "64-hex-not-real".into());
         base.insert("DOTENV_PRIVATE_KEY_SESSION".into(), "dotenvx-key".into());
         let scrubbed = scrubbed_env_with(&base);

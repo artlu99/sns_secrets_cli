@@ -1,1 +1,0 @@
-Generated from the enc1-era working tree at commit 365d2f4 (rs/src/session.rs — the enc1 crypto — byte-identical to that commit) by the throwaway rs/tests/legacy_fixture_gen.rs, since deleted; all secret values are dummies and the key is a throwaway scalar — do not regenerate.

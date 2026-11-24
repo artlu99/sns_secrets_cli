@@ -109,9 +109,7 @@ fn check_line(check: &Check) -> String {
 
 pub fn doctor_checks() -> Vec<Check> {
     // One load for both session checks — decrypting eight fields is not free,
-    // and doctor used to do it three times over. This load transparently
-    // migrates a legacy enc1 session: doctor's first run after the upgrade
-    // performs the one-shot migration, then reports "decrypts".
+    // and doctor used to do it three times over.
     let session = load_session();
     vec![
         Check {
