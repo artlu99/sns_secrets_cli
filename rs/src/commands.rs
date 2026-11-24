@@ -29,7 +29,7 @@ use crate::paths::{
     is_owned_config_file_name, unexpected_config_files, write_plain_config, DEFAULT_API_URL,
 };
 use crate::prompt::{prompt_confirm, prompt_line, prompt_secret};
-use crate::session_file::{delete_session, load_session, persist, save_session, session_key_names};
+use crate::session_file::{delete_session, key_decrypts_session, load_session, persist, save_session, session_key_names};
 use crate::sn_api::{random_db_key, with_access, ApiClient, ApiClientError, SessionSecrets};
 use crate::sync_engine::{run_sync, SyncOptions, SyncReport};
 use crate::time::now_ms;
@@ -109,7 +109,9 @@ fn check_line(check: &Check) -> String {
 
 pub fn doctor_checks() -> Vec<Check> {
     // One load for both session checks — decrypting eight fields is not free,
-    // and doctor used to do it three times over.
+    // and doctor used to do it three times over. This load transparently
+    // migrates a legacy enc1 session: doctor's first run after the upgrade
+    // performs the one-shot migration, then reports "decrypts".
     let session = load_session();
     vec![
         Check {
@@ -151,16 +153,19 @@ fn config_check() -> Check {
     }
 }
 
-fn keychain_check() -> Check {
-    if !keychain::secret_service_available() {
+/// The keychain doctor check, split from its I/O so tests pin the five
+/// outcomes without a keychain (the presence-only check this replaces could
+/// not say whether the stored key still opens the session).
+fn keychain_check_result(service: bool, session_exists: bool, stored: Option<&str>, decrypts: bool) -> Check {
+    if !service {
         return Check {
             name: "keychain",
             ok: true,
             skip: true,
-            detail: "no secret service on this machine — the session key stays in .env.keys".into(),
+            detail: "no secret service on this machine — dotenvx key stays in .env.keys".into(),
         };
     }
-    if !session_path().exists() {
+    if !session_exists {
         return Check {
             name: "keychain",
             ok: true,
@@ -168,20 +173,38 @@ fn keychain_check() -> Check {
             detail: "secret service is available; nothing stored yet".into(),
         };
     }
-    match keychain::keychain_get() {
-        Some(_) => Check {
-            name: "keychain",
-            ok: true,
-            skip: false,
-            detail: "session key retrieved".into(),
-        },
-        None => Check {
+    if stored.is_none() {
+        return Check {
             name: "keychain",
             ok: false,
             skip: false,
-            detail: "session exists but the keychain has no session key".into(),
-        },
+            detail: "session exists but the keychain has no dotenvx key".into(),
+        };
     }
+    if !decrypts {
+        return Check {
+            name: "keychain",
+            ok: false,
+            skip: false,
+            detail: "the keychain dotenvx key does not decrypt .env.session — run sns logout, then sns login".into(),
+        };
+    }
+    Check {
+        name: "keychain",
+        ok: true,
+        skip: false,
+        detail: "dotenvx key retrieved and matches the session".into(),
+    }
+}
+
+fn keychain_check() -> Check {
+    let stored = keychain::keychain_get();
+    keychain_check_result(
+        keychain::secret_service_available(),
+        session_path().exists(),
+        stored.as_deref(),
+        stored.as_deref().map(key_decrypts_session).unwrap_or(false),
+    )
 }
 
 fn session_check(session: &Result<Option<SessionSecrets>, UserError>) -> Check {
@@ -508,9 +531,9 @@ pub fn login_command() -> Result<(), UserError> {
     };
 
     let where_line = if stored.keychain {
-        "session saved. the session key is in the OS keychain"
+        "session saved. dotenvx key is in the OS keychain"
     } else {
-        "session saved. no secret service here — the session key is in .env.keys (mode 0600)"
+        "session saved. no secret service here — dotenvx key is in .env.keys (mode 0600)"
     };
     outro(where_line);
     outro(&sync_summary(&synced.report, synced.replaced));
@@ -1137,8 +1160,7 @@ mod purge_tests {
     // Serialized: the global config override has one slot, and concurrent
     // tests would otherwise resolve into each other's config dirs.
     fn serial_guard() -> std::sync::MutexGuard<'static, ()> {
-        static CONFIG_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        CONFIG_LOCK.lock().expect("test config lock")
+        crate::paths::lock_config_for_tests()
     }
 
     fn seeded_dir(tag: &str) -> PathBuf {
@@ -1245,5 +1267,39 @@ mod purge_tests {
             purge_command(true).unwrap();
         });
         assert!(!dir.exists());
+    }
+}
+
+#[cfg(test)]
+mod doctor_tests {
+    use super::*;
+
+    /// The five keychain outcomes, split from I/O so this runs without a
+    /// keychain, a session file, or a config dir. The detail strings are
+    /// TS-verbatim (src/commands/doctor.ts) and load-bearing.
+    #[test]
+    fn keychain_check_reports_the_five_ts_outcomes() {
+        let check = keychain_check_result(false, false, None, false);
+        assert!(check.skip && check.ok, "no service: SKIP");
+        assert_eq!(check.detail, "no secret service on this machine — dotenvx key stays in .env.keys");
+
+        let check = keychain_check_result(true, false, None, false);
+        assert!(check.skip && check.ok, "no session yet: SKIP");
+        assert_eq!(check.detail, "secret service is available; nothing stored yet");
+
+        let check = keychain_check_result(true, true, None, false);
+        assert!(!check.skip && !check.ok, "no stored key: FAIL");
+        assert_eq!(check.detail, "session exists but the keychain has no dotenvx key");
+
+        let check = keychain_check_result(true, true, Some(&"aa".repeat(32)), false);
+        assert!(!check.skip && !check.ok, "stored key does not decrypt: FAIL");
+        assert_eq!(
+            check.detail,
+            "the keychain dotenvx key does not decrypt .env.session — run sns logout, then sns login"
+        );
+
+        let check = keychain_check_result(true, true, Some(&"aa".repeat(32)), true);
+        assert!(!check.skip && check.ok, "stored key matches: ok");
+        assert_eq!(check.detail, "dotenvx key retrieved and matches the session");
     }
 }

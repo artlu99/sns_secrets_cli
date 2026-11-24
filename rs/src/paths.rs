@@ -23,6 +23,19 @@ pub fn with_config_dir<T>(dir: &str, run: impl FnOnce() -> T) -> T {
     result
 }
 
+/// Serialize every test that resolves paths through the config override.
+/// with_config_dir guards only the set/restore of the override, not the
+/// closure: two modules' closures running concurrently would re-point the
+/// global override under each other and resolve into each other's
+/// directories. Every config-dir test takes this one process-wide lock for
+/// its whole closure (the per-module mutexes this replaces did not
+/// serialize across modules).
+#[cfg(test)]
+pub(crate) fn lock_config_for_tests() -> std::sync::MutexGuard<'static, ()> {
+    static CONFIG_TEST_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
+    CONFIG_TEST_LOCK.lock().expect("config test lock")
+}
+
 pub fn config_dir() -> PathBuf {
     let guard = CONFIG_OVERRIDE.lock().expect("config override lock");
     if let Some(overridden) = guard.as_ref() {
@@ -353,6 +366,7 @@ mod tests {
     #[test]
     fn a_broken_config_dir_is_a_user_error_not_a_panic() {
         let dir = blocked_dir("ensure");
+        let _serial = lock_config_for_tests();
         with_config_dir(&dir, || {
             let error = ensure_config_dir().expect_err("creation fails with a message");
             assert!(error.0.contains(&dir), "message names the path: {}", error.0);
@@ -365,6 +379,7 @@ mod tests {
     #[test]
     fn write_plain_config_reports_a_broken_config_dir_instead_of_panicking() {
         let dir = blocked_dir("write");
+        let _serial = lock_config_for_tests();
         with_config_dir(&dir, || {
             let error = write_plain_config(Some("a@b.c"), None).expect_err("write fails with a message");
             assert!(error.0.contains("writable"), "message is actionable: {}", error.0);
@@ -378,6 +393,7 @@ mod tests {
         let dir = std::env::temp_dir().join(format!("sns-paths-gate-{}", std::process::id()));
         let _ = std::fs::remove_dir_all(&dir);
         std::fs::create_dir_all(&dir).expect("temp root creates");
+        let _serial = lock_config_for_tests();
         with_config_dir(&dir.display().to_string(), || {
             std::fs::write(env_path(), "SN_EMAIL=a@b.c\nSN_API_URL=http://api.example.com\n").expect(".env writes");
             let error = read_plain_config().expect_err("plaintext remote refused");

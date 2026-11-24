@@ -65,7 +65,7 @@ Prefer Bun over Node for this tree:
 **Exceptions for this project:**
 
 - The encrypted cache uses `better-sqlite3-multiple-ciphers` (cipher `chacha20`), not `bun:sqlite` — bun:sqlite has no encryption support. The Rust port uses the same cipher via vendored sqlite3mc in [`rs/libsqlite3-sys/`](rs/libsqlite3-sys/).
-- Plain `.env` is non-secret only (`SN_EMAIL`, `SN_API_URL`). Session secrets live in dotenvx-encrypted `.env.session` in this tree (library decrypt via `@dotenvx/dotenvx`, not `dotenvx run --`); the Rust port encrypts the same field names with its own `enc1:` format instead — the two session formats are not interoperable (SECURITY.md). Never put `SN_PASSWORD` in any env file.
+- Plain `.env` is non-secret only (`SN_EMAIL`, `SN_API_URL`). Session secrets live in dotenvx-encrypted `.env.session` in this tree (library decrypt via `@dotenvx/dotenvx`, not `dotenvx run --`); the Rust port implements the same dotenvx wire format natively — one `.env.session` serves the TypeScript CLI, the Rust CLI, and the `dotenvx` CLI (SECURITY.md). The wire is pinned by golden vectors in `rs/tests/fixtures/session-vectors.json`, asserted on this side by `src/session-vectors.test.ts`. Never put `SN_PASSWORD` in any env file.
 
 SN protocol crypto stays inside [`src/sn-crypto/`](src/sn-crypto/). The MIT tree uses `libsodium-wrappers-sumo` (Argon2id + XChaCha20-Poly1305); do not pull AGPL `@standardnotes/sncrypto-node`.
 
@@ -90,7 +90,7 @@ Discipline that keeps the port honest:
 Before merging CLI or extension work that touches secrets, session, cache, or crypto:
 
 - `SN_PASSWORD` must not appear in any file, env var, argv, or log.
-- `.env.session` holds session material only (tokens, cookies, expirations, `SN_DB_KEY`, account email label, the session public key — dotenvx's `DOTENV_PUBLIC_KEY_SESSION` or the Rust `enc1:` header's `SNS_SESSION_PUBLIC_KEY`) — never the account password, master key, or note plaintext.
+- `.env.session` holds session material only (tokens, cookies, expirations, `SN_DB_KEY`, account email label, the session public key — dotenvx's `DOTENV_PUBLIC_KEY_SESSION`) — never the account password, master key, or note plaintext.
 - Scrub secret-named env vars before spawning children (pager, clipboard helpers, editors).
 - Plaintext note content is never written to disk (no temp files; pager via stdin; OSC 52 on stdout).
 - Values never print on inventory paths; only copy / one-key clipboard flows expose a value.

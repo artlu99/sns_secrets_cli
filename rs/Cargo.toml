@@ -15,6 +15,7 @@ getrandom = "0.4.3"
 hex = "0.4.3"
 hkdf = "0.13.0"
 indexmap = "2.14.2"
+k256 = { version = "0.14.0", features = ["ecdh"] }
 jiff = "0.2.43"
 libc = "0.2.191"
 p256 = { version = "0.14.0", features = ["ecdh"] }

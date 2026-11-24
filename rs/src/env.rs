@@ -15,6 +15,9 @@ pub fn is_secret_env_name(name: &str) -> bool {
     if name == "DOTENV_KEY" || name.starts_with("DOTENV_PRIVATE_KEY") {
         return true;
     }
+    // Kept deliberately: until the one-shot migration replaces .env.keys,
+    // the legacy SNS_SESSION_PRIVATE_KEY line is a live credential, and an
+    // exported copy of the environment must stay scrubbed.
     if name == "SNS_SESSION_PRIVATE_KEY" {
         return true;
     }
@@ -172,8 +175,9 @@ mod tests {
         ] {
             assert!(is_secret_env_name(name), "{name} is a secret name");
         }
-        // the two public names, and everything unrelated, are not secrets
-        for name in ["SN_EMAIL", "SN_API_URL", "PATH", "HOME", "LANG"] {
+        // the two public names, the session public-key marker, and
+        // everything unrelated, are not secrets
+        for name in ["SN_EMAIL", "SN_API_URL", "DOTENV_PUBLIC_KEY_SESSION", "PATH", "HOME", "LANG"] {
             assert!(!is_secret_env_name(name), "{name} is not a secret name");
         }
     }

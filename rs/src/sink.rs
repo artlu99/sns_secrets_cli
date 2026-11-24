@@ -178,10 +178,11 @@ mod tests {
     /// saved session plus one settings note seeded into the cache at the
     /// config paths, so `open_cache` resolves. Serialized: the global
     /// config override has one slot, and concurrent tests would otherwise
-    /// resolve into each other's config dirs (WrongKey crossfire).
+    /// resolve into each other's config dirs (WrongKey crossfire). The lock
+    /// is the crate-wide config test lock: per-module mutexes do not
+    /// serialize across modules.
     fn with_sink_cache(run: impl FnOnce(&Path)) {
-        static CONFIG_LOCK: std::sync::Mutex<()> = std::sync::Mutex::new(());
-        let _serial = CONFIG_LOCK.lock().expect("test config lock");
+        let _serial = crate::paths::lock_config_for_tests();
         let dir = std::env::temp_dir().join(format!(
             "sns-rs-sink-{}-{}",
             std::process::id(),

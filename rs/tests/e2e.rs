@@ -152,3 +152,43 @@ fn the_binary_drives_a_crafted_session_end_to_end() {
     drop(db);
     let _ = config_dir(); // touch the module so the import stays honest
 }
+
+/// The upgrade path, through the real binary: a legacy enc1 session (fixture
+/// captured from the enc1-era code) is migrated on the first command that
+/// loads it, custody settles into `.env.keys`, and health reports clean.
+/// Like the main e2e above, this assumes the test machine has no secret
+/// service (no secret-tool): the compiled binary cannot be told to skip the
+/// keychain, and a live service would receive the migration's upsert.
+#[test]
+fn the_binary_migrates_a_legacy_enc1_session_and_reports_health() {
+    let dir = std::env::temp_dir().join(format!("sns-e2e-migrate-{}", std::process::id()));
+    let _ = std::fs::remove_dir_all(&dir);
+    std::fs::create_dir_all(&dir).expect("config dir creates");
+    std::fs::write(dir.join(".env.session"), include_str!("fixtures/legacy-enc1/.env.session"))
+        .expect("fixture session seeds");
+    std::fs::write(dir.join(".env.keys"), include_str!("fixtures/legacy-enc1/.env.keys"))
+        .expect("fixture keys seeds");
+    std::fs::write(dir.join(".env"), "SN_EMAIL=mig@example.test\nSN_API_URL=https://api.standardnotes.com\n")
+        .expect("plain config seeds");
+
+    // doctor's load migrates, then reports a decrypting session.
+    let (code, stdout, stderr) = run_cli(&["doctor"], &dir.display().to_string());
+    assert_eq!(code, 0, "doctor exit\nstdout: {stdout}\nstderr: {stderr}");
+    assert!(stdout.contains("ok    session"), "stdout:\n{stdout}\nstderr: {stderr}");
+    assert!(stdout.contains("decrypts"), "stdout:\n{stdout}");
+
+    // The on-disk state is fully migrated.
+    let session = std::fs::read_to_string(dir.join(".env.session")).expect("session reads");
+    assert!(session.contains("DOTENV_PUBLIC_KEY_SESSION="), "migrated header present:\n{session}");
+    assert!(!session.contains("enc1:"), "no legacy records remain");
+    let keys = std::fs::read_to_string(dir.join(".env.keys")).expect("keys reads");
+    assert!(keys.contains("DOTENV_PRIVATE_KEY_SESSION="), "dotenvx custody line present: {keys}");
+    assert!(!keys.contains("SNS_SESSION_PRIVATE_KEY="), "legacy custody line gone: {keys}");
+
+    // Post-migration reads go through the dotenvx attempt in a fresh process.
+    let (code, _stdout, stderr) = run_cli(&["list"], &dir.display().to_string());
+    assert_eq!(code, 1);
+    assert!(stderr.contains("no cache yet — run sns sync"), "stderr: {stderr}");
+
+    let _ = std::fs::remove_dir_all(&dir);
+}
