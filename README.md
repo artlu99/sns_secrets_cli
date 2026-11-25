@@ -1,6 +1,6 @@
 # sn-secrets-cli
 
-A **secure, read-only** companion for [Standard Notes](https://standardnotes.com) — the same vault on two surfaces:
+A **secure, read-only** companion CLI+Chrome extension for [Standard Notes](https://standardnotes.com) secret vaults.
 
 | Surface | When you use it |
 |---|---|
