@@ -47,11 +47,11 @@ Designed to move with you without dragging secrets into the wrong place:
 - **Same account, same rules.** Tag nesting, key parsing, and redaction match on both surfaces so a note that looks safe in the terminal looks safe in the popup.
 - **Small config surface (CLI).** Everything under `~/.config/sn_secrets_cli/` (or `SNS_CONFIG_DIR`). Plain `.env` is non-secret (`SN_EMAIL`, `SN_API_URL`); session material is encrypted at rest in a single dotenvx-format `.env.session` that both binaries read and write natively — so the TypeScript CLI, the Rust CLI, and the `dotenvx` CLI itself are interchangeable over one file (a `.env.session` from an older sns release is not readable: `sns logout` followed by `sns login` recovers). Prefer an OS keychain for the session private key when a secret service is available.
 - **Linux and macOS.** There is no Windows build: the Rust crate refuses to compile on Windows, and the TypeScript CLI under Bun is only partially usable there — no OS keychain integration, no platform clipboard helpers, POSIX path assumptions — leaving OSC 52 in a capable terminal as the only copy path.
-- **Small static CLI.** Prebuilt Rust binaries are coming soon. Until then, build from [`rs/`](rs/) (`bun run build:rust`) or run the TypeScript tip of spear under [Bun](https://bun.sh) while developing (`bun src/index.ts` / `bun run build`).
+- **Small static CLI.** Every release ships prebuilt Rust binaries — Apple Silicon, Intel, and Linux x86_64 musl (a ~4 MB download each). Build from [`rs/`](rs/) (`bun run build:rust`) if you prefer, or run the TypeScript tip of spear under [Bun](https://bun.sh) while developing (`bun src/index.ts` / `bun run build`).
 
 ## Install
 
-- **CLI** — download a release binary when published, or build as above. Then `sns login` (password + MFA if required), which syncs into the encrypted cache and drops the password. Login always confirms the email (pre-filled from `SN_EMAIL`); choose another address to switch accounts — you will be asked to logout the current session first.
+- **CLI** — download a release binary from the release page (Apple Silicon, Intel, and Linux x86_64 musl builds ship with every release), or build as above. Then `sns login` (password + MFA if required), which syncs into the encrypted cache and drops the password. Login always confirms the email (pre-filled from `SN_EMAIL`); choose another address to switch accounts — you will be asked to logout the current session first.
 
 Where to put the binary (untar the release archive first):
 
