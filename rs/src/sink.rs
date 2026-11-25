@@ -5,7 +5,10 @@
 
 use std::io::Write as _;
 use std::os::unix::fs::{OpenOptionsExt as _, PermissionsExt as _};
-use std::path::{Path, PathBuf};
+use std::path::Path;
+// Used only by the linux-only tmpfs probe, which walks candidate dirs.
+#[cfg(target_os = "linux")]
+use std::path::PathBuf;
 
 use crate::commands::open_cache;
 use crate::errors::UserError;

@@ -30,14 +30,6 @@ terminal_size = "0.4.4"
 url = "2.5.8"
 zeroize = "1.9.1"
 
-# macOS custody transport (rs/src/keychain.rs): SecItem spoken in-process,
-# so no subprocess ever carries the session key. The -sys crate is a direct
-# dependency because errSecItemNotFound is not re-exported by the wrapper.
-# Target-gated: Linux never compiles or links either crate.
-[target.'cfg(target_os = "macos")'.dependencies]
-security-framework = { version = "3.7", default-features = false }
-security-framework-sys = { version = "2.17", default-features = false }
-
 # The bundled libsqlite3-sys amalgamation is swapped for SQLite3 Multiple
 # Ciphers (the upstream of better-sqlite3-multiple-ciphers), so the cache
 # keeps its chacha20 at-rest encryption with the same pragmas and defaults.

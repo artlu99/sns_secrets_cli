@@ -1,64 +1,26 @@
 //! Custody transport for the session private key: one OS secret-service slot
-//! (`service=sn_secrets_cli`, `account=dotenvkey`). Linux speaks to the
-//! secret service through `secret-tool` — label arguments only, the secret
-//! itself rides stdin. macOS speaks SecItem in-process through
-//! security-framework: no subprocess, so no argv and no child stdio ever
-//! carry the key. (The TypeScript CLI keeps the `security` tool on macOS,
-//! driving writes through the tool's stdin command mode; this crate does not
-//! spawn it anywhere.)
+//! (`service=sn_secrets_cli`, `account=dotenvkey`), reached through the same
+//! CLI tools on every platform — `secret-tool` on Linux, the `security` CLI
+//! on macOS — run with the scrubbed environment. The direction that matters:
+//! writes hand the tool the secret over stdin (`secret-tool`'s stdin, or
+//! `security -i`, the tool's stdin command mode), so no argument list ever
+//! carries it; reads take it from the tool's stdout, the only retrieval
+//! transport those tools offer — the same crossing the TypeScript CLI makes,
+//! and inside the same-user boundary that could run the lookup itself.
 
 const SERVICE: &str = "sn_secrets_cli";
 const ACCOUNT: &str = "dotenvkey";
 
-#[cfg(target_os = "macos")]
-mod mac_keychain {
-    use security_framework::passwords;
-    use security_framework_sys::base::errSecItemNotFound;
-
-    use super::{ACCOUNT, KeychainDeleteResult, SERVICE};
-
-    /// The stored scalar, straight out of SecItem — no CLI trailing newline
-    /// to strip, no stdout involved.
-    pub(super) fn get() -> Option<String> {
-        match passwords::get_generic_password(SERVICE, ACCOUNT) {
-            Ok(bytes) => Some(String::from_utf8_lossy(&bytes).into_owned()),
-            Err(_) => None,
-        }
-    }
-
-    /// SecItemAdd, which upserts: on errSecDuplicateItem only the value data
-    /// is updated — the same semantics as `security add-generic-password -U`,
-    /// against the same class+service+account query, so items the CLI tools
-    /// wrote are replaced in place and items this writes are readable by them.
-    pub(super) fn put(secret: &str) -> bool {
-        passwords::set_generic_password(SERVICE, ACCOUNT, secret.as_bytes()).is_ok()
-    }
-
-    /// A missing item counts as deleted: nothing to remove is the outcome
-    /// every caller wants, and SecItemNotFound is that, not a failure.
-    pub(super) fn delete() -> KeychainDeleteResult {
-        match passwords::delete_generic_password(SERVICE, ACCOUNT) {
-            Ok(()) => KeychainDeleteResult::Deleted,
-            Err(error) if error.code() == errSecItemNotFound => KeychainDeleteResult::Deleted,
-            Err(_) => KeychainDeleteResult::Unconfirmed,
-        }
-    }
-}
-
-#[cfg(not(target_os = "macos"))]
 use std::process::Stdio;
 
-#[cfg(not(target_os = "macos"))]
 use crate::env::{scrubbed_command, which};
 
-#[cfg(not(target_os = "macos"))]
 struct RunResult {
     code: i32,
     stdout: String,
     stderr: String,
 }
 
-#[cfg(not(target_os = "macos"))]
 fn run(command: &str, args: &[&str], stdin: Option<&str>) -> Result<RunResult, String> {
     let mut child = scrubbed_command(command)
         .args(args)
@@ -81,7 +43,6 @@ fn run(command: &str, args: &[&str], stdin: Option<&str>) -> Result<RunResult, S
     })
 }
 
-#[cfg(not(target_os = "macos"))]
 fn probe_result(stderr: &str, code: i32) -> bool {
     if code == 0 {
         return true;
@@ -127,19 +88,16 @@ pub fn secret_service_available() -> bool {
     if disabled() {
         return false;
     }
-    #[cfg(target_os = "macos")]
-    {
-        // SecItem is linked into this binary; the login keychain is part of
-        // every macOS user session, and there is no daemon probe to make.
-        return true;
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
+    if cfg!(target_os = "macos") {
+        // TS parity: on macOS the only question is whether the `security`
+        // tool is on PATH — the login keychain is part of every macOS user
+        // session, and there is no daemon probe to make.
+        which("security")
+    } else {
         linux_service_answered()
     }
 }
 
-#[cfg(not(target_os = "macos"))]
 fn linux_service_answered() -> bool {
     if !which("secret-tool") {
         return false;
@@ -150,7 +108,6 @@ fn linux_service_answered() -> bool {
     }
 }
 
-#[cfg(not(target_os = "macos"))]
 fn strip_trailing_newline(text: &str) -> String {
     text.strip_suffix('\n').unwrap_or(text).to_string()
 }
@@ -165,49 +122,67 @@ pub fn keychain_get() -> Option<String> {
     if disabled() {
         return None;
     }
-    #[cfg(target_os = "macos")]
-    {
-        return mac_keychain::get();
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let result = run("secret-tool", &["lookup", "service", SERVICE, "account", ACCOUNT], None).ok()?;
+    if cfg!(target_os = "macos") {
+        // Same transport as the TypeScript CLI: the key comes back on the
+        // tool's stdout (its only retrieval form), one trailing newline off.
+        let result = run(
+            "security",
+            &["find-generic-password", "-s", SERVICE, "-a", ACCOUNT, "-w"],
+            None,
+        )
+        .ok()?;
         if result.code != 0 {
             return None;
         }
-        Some(strip_trailing_newline(&result.stdout))
+        return Some(strip_trailing_newline(&result.stdout));
     }
+    let result = run("secret-tool", &["lookup", "service", SERVICE, "account", ACCOUNT], None).ok()?;
+    if result.code != 0 {
+        return None;
+    }
+    Some(strip_trailing_newline(&result.stdout))
 }
 
 pub fn keychain_put(secret: &str) -> bool {
     if !secret_service_available() {
         return false;
     }
-    #[cfg(target_os = "macos")]
-    {
-        return mac_keychain::put(secret);
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        run(
-            "secret-tool",
-            &["store", &format!("--label={SERVICE} dotenvx key"), "service", SERVICE, "account", ACCOUNT],
-            Some(secret),
+    if cfg!(target_os = "macos") {
+        // The key must not sit in an argument list: `security -i` is the
+        // tool's documented interactive mode — it reads commands from stdin
+        // (the prompt appears only on a tty; exit status is the status of
+        // the last command) — so the secret transits one anonymous pipe
+        // instead of argv, where every same-user process could read it.
+        // The line is argv-tokenized by the tool's own quoting rules;
+        // SERVICE/ACCOUNT and the 64-hex key need no quoting, and -v must
+        // never be added (verbose echoes every argument, including the -w
+        // value, to stderr). `add-generic-password -U` upserts, so items
+        // the other binary or the dotenvx CLI wrote are replaced in place.
+        return run(
+            "security",
+            &["-i"],
+            Some(&format!("add-generic-password -U -s {SERVICE} -a {ACCOUNT} -w {secret}\n")),
         )
         .map(|result| result.code == 0)
-        .unwrap_or(false)
+        .unwrap_or(false);
     }
+    run(
+        "secret-tool",
+        &["store", &format!("--label={SERVICE} dotenvx key"), "service", SERVICE, "account", ACCOUNT],
+        Some(secret),
+    )
+    .map(|result| result.code == 0)
+    .unwrap_or(false)
 }
 
 /// Outcome of a keychain removal (mirrors src/keychain.ts KeychainDeleteResult).
 #[derive(Debug, Clone, Copy, PartialEq, Eq)]
 pub enum KeychainDeleteResult {
-    /// The delete tool exited 0 (in-process SecItem on macOS: the item is
-    /// gone, and a missing item counts here too — deleting nothing succeeded).
+    /// The delete tool exited 0.
     Deleted,
-    /// The delete failed or could not be attempted: on the TypeScript CLI's
-    /// macOS route a missing item also lands here (the security tool reports
-    /// missing items as failure) — callers warn either way.
+    /// The delete failed or could not be attempted: on macOS a missing item
+    /// also lands here (the security tool reports missing items as failure)
+    /// — callers warn either way, on both binaries.
     Unconfirmed,
     /// No secret service answered: the item's state is unknown, probably present.
     Unavailable,
@@ -219,18 +194,17 @@ pub fn keychain_delete() -> KeychainDeleteResult {
     if !secret_service_available() {
         return KeychainDeleteResult::Unavailable;
     }
-    #[cfg(target_os = "macos")]
-    {
-        return mac_keychain::delete();
-    }
-    #[cfg(not(target_os = "macos"))]
-    {
-        let result = run("secret-tool", &["clear", "service", SERVICE, "account", ACCOUNT], None);
-        match result {
+    if cfg!(target_os = "macos") {
+        let result = run("security", &["delete-generic-password", "-s", SERVICE, "-a", ACCOUNT], None);
+        return match result {
             Ok(output) if output.code == 0 => KeychainDeleteResult::Deleted,
-            Ok(_) => KeychainDeleteResult::Unconfirmed,
-            Err(_) => KeychainDeleteResult::Unconfirmed,
-        }
+            _ => KeychainDeleteResult::Unconfirmed,
+        };
+    }
+    let result = run("secret-tool", &["clear", "service", SERVICE, "account", ACCOUNT], None);
+    match result {
+        Ok(output) if output.code == 0 => KeychainDeleteResult::Deleted,
+        _ => KeychainDeleteResult::Unconfirmed,
     }
 }
 
